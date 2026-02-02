@@ -1,2 +1,28 @@
 # Claude
 CLAUDE.md
+
+# Configurations
+config.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+reports/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

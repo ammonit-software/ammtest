@@ -5,19 +5,33 @@ Python test framework for testing critical software systems via ammio.
 ## Installation
 
 ```bash
-pip install pynng
-pip install -e .
+uv add ammtest
 ```
 
 ## Usage
 
+**tests/conftest.py:**
 ```python
+import pytest
 from ammtest import AmmioClient
 
-client = AmmioClient()
-client.force("sensor_temperature", 85.5)
-value = client.read("motor_speed")
-client.close()
+@pytest.fixture(scope="session")
+def client():
+    c = AmmioClient("config/config.json")
+    yield c
+    c.close()
+```
+
+**tests/test_example.py:**
+```python
+def test_brake_response(client):
+    client.force("brake_request", True)
+    assert client.read("brake_status") == 1
+```
+
+**Run:**
+```bash
+pytest
 ```
 
 Requires [ammio](https://github.com/ammonit-software/ammio) to be running.
