@@ -20,6 +20,24 @@ def pytest_configure(config):  # noqa: ARG001
     _results.clear()
 
 
+def pytest_report_header(config):  # noqa: ARG001
+    """Add ammtest info to the pytest session header."""
+    return [
+        f"ammtest 0.1.0",
+        f"reports: {REPORTS_DIR.absolute()}",
+    ]
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_logstart(nodeid, location):  # noqa: ARG001
+    """Print test docstring after pytest prints the test path."""
+    filepath = nodeid.split("::")[0]
+    docstring = _extract_docstring(filepath)
+    if docstring:
+        for line in docstring.split("\n"):
+            print(f"  {line}")
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     """Collect test results and logs."""

@@ -2,14 +2,14 @@ from .client import AmmioClient
 from .exceptions import (
     AmmioConnectionError,
     AmmioError,
-    SignalNotFoundError,
-    SignalTypeError,
+    VariableNotFoundError,
+    VariableTypeError,
 )
 
 __all__ = [
     "AmmioClient",
     "AmmioError",
-    "SignalNotFoundError",
-    "SignalTypeError",
+    "VariableNotFoundError",
+    "VariableTypeError",
     "AmmioConnectionError",
 ]

@@ -8,8 +8,8 @@ import pynng
 from .exceptions import (
     AmmioConnectionError,
     AmmioError,
-    SignalNotFoundError,
-    SignalTypeError,
+    VariableNotFoundError,
+    VariableTypeError,
 )
 
 logger = logging.getLogger("ammtest")
@@ -26,7 +26,7 @@ class AmmioClient:
         Initialize client from config file.
 
         Args:
-            config_path: Path to JSON config file containing endpoint
+            config_path: Path to JSON config file
         """
         self._config = self._load_config(config_path)
         self._socket = None
@@ -44,7 +44,7 @@ class AmmioClient:
 
     def _connect(self) -> None:
         """Establish connection to ammio service with retries."""
-        endpoint = self._config.get("endpoint")
+        endpoint = self._config.get("connection").get("endpoint")
         if not endpoint:
             raise AmmioError("Config missing 'endpoint' field")
 
@@ -58,7 +58,9 @@ class AmmioClient:
                 return  # Success
             except (pynng.exceptions.ConnectionRefused, pynng.exceptions.Timeout) as e:
                 last_error = e
-                logger.warning(f"Connection attempt {attempt}/{CONNECTION_RETRIES} failed: {e}")
+                logger.warning(
+                    f"Connection attempt {attempt}/{CONNECTION_RETRIES} failed: {e}"
+                )
                 if self._socket:
                     self._socket.close()
                     self._socket = None
@@ -87,34 +89,36 @@ class AmmioClient:
 
     def _handle_response(self, response: dict, var_id: str) -> None:
         """Check response for errors."""
-        if response.get("status") == "error":
-            error_msg = response.get("message", "Unknown error")
-            if "not found" in error_msg.lower():
-                raise SignalNotFoundError(f"Signal not found: {var_id}")
-            elif "type" in error_msg.lower():
-                raise SignalTypeError(f"Type mismatch for signal: {var_id}")
+        error = response.get("error")
+        if error:
+            if error == "variable not found":
+                raise VariableNotFoundError(f"Variable not found: {var_id}")
+            elif error == "missing value":
+                raise VariableTypeError(f"Missing value for variable: {var_id}")
             else:
-                raise AmmioError(error_msg)
+                raise AmmioError(f"{error} (var_id: {var_id})")
 
     def force(self, var_id: str, value: Union[int, float, bool]) -> None:
         """
         Force a value into the var_table.
 
         Args:
-            var_id: Signal identifier
+            var_id: Variable identifier
             value: Value to force
 
         Raises:
-            SignalNotFoundError: If var_id not found
-            SignalTypeError: If value type doesn't match
+            VariableNotFoundError: If var_id not found
+            VariableTypeError: If value type doesn't match
             AmmioConnectionError: If communication fails
         """
         logger.info(f"FORCE: {var_id} = {value}")
-        response = self._send_request({
-            "cmd": "write",
-            "name": var_id,
-            "value": value,
-        })
+        response = self._send_request(
+            {
+                "cmd": "write",
+                "name": var_id,
+                "value": value,
+            }
+        )
         self._handle_response(response, var_id)
 
     def read(self, var_id: str) -> Union[int, float, bool]:
@@ -122,19 +126,21 @@ class AmmioClient:
         Read current value from the var_table.
 
         Args:
-            var_id: Signal identifier
+            var_id: Variable identifier
 
         Returns:
-            Current value of the signal
+            Current value of the variable
 
         Raises:
-            SignalNotFoundError: If var_id not found
+            VariableNotFoundError: If var_id not found
             AmmioConnectionError: If communication fails
         """
-        response = self._send_request({
-            "cmd": "read",
-            "name": var_id,
-        })
+        response = self._send_request(
+            {
+                "cmd": "read",
+                "name": var_id,
+            }
+        )
         self._handle_response(response, var_id)
         value = response.get("value")
         logger.info(f"READ: {var_id} = {value}")

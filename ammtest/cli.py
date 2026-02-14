@@ -5,9 +5,9 @@ Usage:
     ammtest run <path>        Run tests and generate reports
     ammtest run tests/ -v     Run with verbose output
 """
-import subprocess
 import sys
-from pathlib import Path
+
+import pytest
 
 
 def main():
@@ -51,16 +51,8 @@ def run_tests(args):
         print("Usage: ammtest run <path>")
         sys.exit(1)
 
-    print("=" * 60)
-    print("ammtest - Running tests")
-    print("=" * 60)
-    print(f"Reports directory: {Path('reports').absolute()}")
-    print()
-    sys.stdout.flush()
-
-    # Build pytest command with plugins and live logging
+    # Build pytest args with plugins and live logging
     pytest_args = [
-        "pytest",
         "-p", "ammtest.fixtures",
         "-p", "ammtest.reporter",
         "--log-cli-level=INFO",
@@ -71,18 +63,18 @@ def run_tests(args):
     ]
     pytest_args.extend(args)
 
-    # Run pytest (reporter generates reports live)
-    result = subprocess.run(pytest_args)
+    # Run pytest in-process (enables debugger breakpoints)
+    returncode = pytest.main(pytest_args)
 
     print()
     print("=" * 60)
-    if result.returncode == 0:
+    if returncode == 0:
         print("Result: ALL TESTS PASSED")
     else:
         print("Result: SOME TESTS FAILED")
     print("=" * 60)
 
-    sys.exit(result.returncode)
+    sys.exit(returncode)
 
 
 if __name__ == "__main__":
