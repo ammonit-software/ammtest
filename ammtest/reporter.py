@@ -1,114 +1,108 @@
 """
-pytest plugin for ammtest report generation.
+pytest plugin for ammtest result generation.
 
-Generates .txt report per test file (after completion).
+Generates one .txt result per test file, mirroring the test directory structure.
 """
 
+import logging
 import re
+import sys
+from datetime import datetime
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
 
+from ammtest.config import get_config
+
+logger = logging.getLogger("ammtest")
+
+TEST_METADATA = [
+    "VERSION",
+    "DESCRIPTION",
+    "REQUIREMENTS",
+]
+
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
-
-REPORTS_DIR = Path("reports")
-_results = {}
-
-
-def pytest_configure(config):  # noqa: ARG001
-    REPORTS_DIR.mkdir(exist_ok=True)
-    _results.clear()
-
-
-def pytest_report_header(config):  # noqa: ARG001
-    """Add ammtest info to the pytest session header."""
-    return [
-        f"ammtest 0.1.0",
-        f"reports: {REPORTS_DIR.absolute()}",
-    ]
+_results_dir = None
+_test_path = None
 
 
 @pytest.hookimpl(trylast=True)
-def pytest_runtest_logstart(nodeid, location):  # noqa: ARG001
-    """Print test docstring after pytest prints the test path."""
-    filepath = nodeid.split("::")[0]
-    docstring = _extract_docstring(filepath)
-    if docstring:
-        for line in docstring.split("\n"):
-            print(f"  {line}")
+def pytest_configure(config):
+    global _results_dir, _test_path
+
+    _, CONFIG = get_config(config)
+    _results_dir = Path(CONFIG["results_path"])
+    _results_dir.mkdir(parents=True, exist_ok=True)
+
+    _test_path = Path(config.args[0]) if config.args else None
+
+
+def pytest_report_header(config):
+    return [
+        f"results: {_results_dir.absolute()}",
+    ]
+
+
+def pytest_runtest_setup(item):
+
+    labels = {
+        "DATE": datetime.now().strftime("%Y-%m-%d-%H:%M:%S"),
+        "python VERSION": sys.version,
+        "ammtest VERSION": version("ammtest"),
+        "TEST": item.nodeid,
+    }
+
+    for attr in TEST_METADATA:
+        value = getattr(item.module, attr, None)
+        if value is not None:
+            labels[attr] = value
+
+    label_width = max(len(label) for label in labels) + 1
+
+    for label, value in labels.items():
+        logger.info(f"{label}:{' '*(label_width-len(label))}{value}")
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
-    """Collect test results and logs."""
     outcome = yield
     report = outcome.get_result()
 
-    if call.when == "call":
-        test_file = item.fspath.purebasename
-        if test_file not in _results:
-            _results[test_file] = {"path": item.fspath, "tests": []}
+    if call.when != "call":
+        return
 
-        # Capture logs from report sections
+    test_file = Path(str(item.fspath))
+    rel_path = _relative_path(test_file)
+    result_path = _results_dir / rel_path.with_suffix(".txt")
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(result_path, "w") as f:
+        module = item.module
+        for attr in TEST_METADATA:
+            value = getattr(module, attr, None)
+            if value is not None:
+                f.write(f"{attr}: {value}\n")
+
+        f.write(f"\nSTATUS: {'PASSED' if report.passed else 'FAILED'}\n")
+        f.write(f"DURATION: {report.duration:.3f}s\n")
+
         logs = ""
         for section_name, section_content in report.sections:
             if "log" in section_name.lower():
                 logs += section_content
+        if logs.strip():
+            f.write(f"\nLOGS:\n{_ANSI_ESCAPE.sub('', logs.strip())}\n")
 
-        _results[test_file]["tests"].append({
-            "name": item.name,
-            "status": "PASSED" if report.passed else "FAILED",
-            "duration": report.duration,
-            "error": str(report.longrepr) if report.failed else None,
-            "logs": logs.strip(),
-        })
+        if report.failed:
+            f.write(f"\nERROR:\n{report.longrepr}\n")
 
 
-def pytest_runtest_teardown(item, nextitem):
-    """Generate .txt report when test file completes."""
-    current = item.fspath.purebasename
-    next_file = nextitem.fspath.purebasename if nextitem else None
-
-    if current != next_file and current in _results:
-        _write_report(current)
-
-
-def _write_report(test_file):
-    """Write .txt report for a test file."""
-    data = _results[test_file]
-    report_path = REPORTS_DIR / f"{test_file}.txt"
-
-    with open(report_path, "w") as f:
-        f.write("=" * 50 + "\n")
-        f.write(f"TEST: {data['path'].basename}\n")
-        f.write("=" * 50 + "\n")
-
-        docstring = _extract_docstring(data["path"])
-        if docstring:
-            f.write(docstring + "\n")
-        f.write("-" * 50 + "\n\n")
-
-        for t in data["tests"]:
-            f.write(f"{t['status']}: {t['name']} ({t['duration']:.3f}s)\n")
-            if t["logs"]:
-                logs = _ANSI_ESCAPE.sub("", t["logs"])
-                for line in logs.split("\n"):
-                    f.write(f"  {line}\n")
-            if t["error"]:
-                f.write(f"  Error:\n{t['error']}\n")
-            f.write("\n")
-
-        passed = sum(1 for t in data["tests"] if t["status"] == "PASSED")
-        failed = len(data["tests"]) - passed
-        f.write("-" * 50 + "\n")
-        f.write(f"SUMMARY: {passed} passed, {failed} failed\n")
-
-
-def _extract_docstring(filepath):
-    with open(filepath) as f:
-        content = f.read()
-        if content.startswith('"""'):
-            end = content.find('"""', 3)
-            if end != -1:
-                return content[3:end].strip()
-    return ""
+def _relative_path(test_file):
+    if _test_path and _test_path.is_dir():
+        try:
+            return test_file.relative_to(Path.cwd() / _test_path)
+        except ValueError:
+            pass
+    return Path(test_file.name)

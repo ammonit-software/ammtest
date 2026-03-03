@@ -5,12 +5,7 @@ from typing import Union
 
 import pynng
 
-from .exceptions import (
-    AmmioConnectionError,
-    AmmioError,
-    VariableNotFoundError,
-    VariableTypeError,
-)
+from .exceptions import AmmioConnectionError, AmmioError
 
 logger = logging.getLogger("ammtest")
 
@@ -30,7 +25,9 @@ class AmmioClient:
         """
         self._config = self._load_config(config_path)
         self._socket = None
+        self._error_codes = {}
         self._connect()
+        self._fetch_error_codes()
 
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file."""
@@ -44,9 +41,9 @@ class AmmioClient:
 
     def _connect(self) -> None:
         """Establish connection to ammio service with retries."""
-        endpoint = self._config.get("connection").get("endpoint")
+        endpoint = self._config.get("ammio_endpoint")
         if not endpoint:
-            raise AmmioError("Config missing 'endpoint' field")
+            raise AmmioError("Config missing 'ammio_endpoint' field")
 
         last_error = None
         for attempt in range(1, CONNECTION_RETRIES + 1):
@@ -87,18 +84,30 @@ class AmmioClient:
         except Exception as e:
             raise AmmioConnectionError(f"Communication error: {e}")
 
+    def _fetch_error_codes(self) -> None:
+        """Fetch error code definitions from ammio."""
+        response = self._send_request({"cmd": "list_errors"})
+        self._error_codes = response.get("errors", {})
+
     def _handle_response(self, response: dict, var_id: str) -> None:
         """Check response for errors."""
-        error = response.get("error")
-        if error:
-            if error == "variable not found":
-                raise VariableNotFoundError(f"Variable not found: {var_id}")
-            elif error == "missing value":
-                raise VariableTypeError(f"Missing value for variable: {var_id}")
-            else:
-                raise AmmioError(f"{error} (var_id: {var_id})")
+        error_code = response.get("error")
+        if error_code is None:
+            return
 
-    def force(self, var_id: str, value: Union[int, float, bool]) -> None:
+        error_name = self._error_codes.get(
+            str(error_code), f"unknown error ({error_code})"
+        )
+        raise AmmioError(f"{error_name}: {var_id}")
+
+    def list_vars(self) -> list[dict]:
+        """Return the list of variables from ammio's var_table."""
+        response = self._send_request({"cmd": "list_vars"})
+        return response.get("vars", [])
+
+    def force(
+        self, var_id: str, value: Union[int, float, bool], quiet: bool = False
+    ) -> None:
         """
         Force a value into the var_table.
 
@@ -107,11 +116,9 @@ class AmmioClient:
             value: Value to force
 
         Raises:
-            VariableNotFoundError: If var_id not found
-            VariableTypeError: If value type doesn't match
+            AmmioError: If var_id not found or type mismatch
             AmmioConnectionError: If communication fails
         """
-        logger.info(f"FORCE: {var_id} = {value}")
         response = self._send_request(
             {
                 "cmd": "write",
@@ -120,8 +127,10 @@ class AmmioClient:
             }
         )
         self._handle_response(response, var_id)
+        if not quiet:
+            logger.info(f"FORCE: {var_id} = {value}")
 
-    def read(self, var_id: str) -> Union[int, float, bool]:
+    def read(self, var_id: str, quiet: bool = False) -> Union[int, float, bool]:
         """
         Read current value from the var_table.
 
@@ -132,7 +141,7 @@ class AmmioClient:
             Current value of the variable
 
         Raises:
-            VariableNotFoundError: If var_id not found
+            AmmioError: If var_id not found
             AmmioConnectionError: If communication fails
         """
         response = self._send_request(
@@ -143,7 +152,8 @@ class AmmioClient:
         )
         self._handle_response(response, var_id)
         value = response.get("value")
-        logger.info(f"READ: {var_id} = {value}")
+        if not quiet:
+            logger.info(f"READ: {var_id} = {value}")
         return value
 
     def close(self) -> None:

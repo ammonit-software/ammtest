@@ -5,6 +5,7 @@ Usage:
     ammtest run <path>        Run tests and generate reports
     ammtest run tests/ -v     Run with verbose output
 """
+
 import sys
 
 import pytest
@@ -53,26 +54,20 @@ def run_tests(args):
 
     # Build pytest args with plugins and live logging
     pytest_args = [
-        "-p", "ammtest.fixtures",
+        "-p", "ammtest.config",
         "-p", "ammtest.reporter",
         "--log-cli-level=INFO",
-        "--log-cli-format=[%(asctime)s.%(msecs)03d] %(levelname)-8s %(message)s",
+        "--log-cli-format=%(asctime)s.%(msecs)03d %(levelname)-8s %(message)s",
         "--log-cli-date-format=%H:%M:%S",
-        "--log-format=[%(asctime)s.%(msecs)03d] %(levelname)-8s %(message)s (%(filename)s:%(lineno)d)",
+        "--log-level=INFO",
+        "--log-format=%(asctime)s.%(msecs)03d %(levelname)-8s %(message)s",
         "--log-date-format=%H:%M:%S",
+        "--show-capture=no",
     ]
     pytest_args.extend(args)
 
     # Run pytest in-process (enables debugger breakpoints)
     returncode = pytest.main(pytest_args)
-
-    print()
-    print("=" * 60)
-    if returncode == 0:
-        print("Result: ALL TESTS PASSED")
-    else:
-        print("Result: SOME TESTS FAILED")
-    print("=" * 60)
 
     sys.exit(returncode)
 
