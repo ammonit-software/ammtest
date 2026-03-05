@@ -2,17 +2,15 @@
 ammtest CLI - Test runner for safety-critical systems.
 
 Usage:
-    ammtest run <path>        Run tests and generate reports
-    ammtest run tests/ -v     Run with verbose output
+    ammtest run <path>                          Run all tests in folder
+    ammtest run <path> --ammtest-config=<path>  With explicit config
 """
 
+import json
 import sys
-
-import pytest
 
 
 def main():
-    """Main entry point for ammtest CLI."""
     if len(sys.argv) < 2:
         print_usage()
         sys.exit(1)
@@ -30,46 +28,44 @@ def main():
 
 
 def print_usage():
-    """Print CLI usage information."""
     print("ammtest - Test framework for safety-critical systems")
     print()
     print("Usage:")
-    print("  ammtest run <path> [options]    Run tests and generate reports")
+    print("  ammtest run <path> [options]")
     print()
     print("Options:")
-    print("  -v, --verbose                   Verbose output")
-    print("  --ammtest-config=<path>         Config file (default: config/config.json)")
+    print("  --ammtest-config=<path>    Config file (default: config/config.json)")
     print()
     print("Examples:")
-    print("  ammtest run tests/")
-    print("  ammtest run tests/ --ammtest-config=my_config.json")
+    print("  ammtest run examples/")
+    print("  ammtest run examples/ --ammtest-config=config/config.json")
 
 
 def run_tests(args):
-    """Run pytest with live report generation."""
     if not args:
         print("Error: No test path specified")
         print("Usage: ammtest run <path>")
         sys.exit(1)
 
-    # Build pytest args with plugins and live logging
-    pytest_args = [
-        "-p", "ammtest.config",
-        "-p", "ammtest.reporter",
-        "--log-cli-level=INFO",
-        "--log-cli-format=%(asctime)s.%(msecs)03d %(levelname)-8s %(message)s",
-        "--log-cli-date-format=%H:%M:%S",
-        "--log-level=INFO",
-        "--log-format=%(asctime)s.%(msecs)03d %(levelname)-8s %(message)s",
-        "--log-date-format=%H:%M:%S",
-        "--show-capture=no",
-    ]
-    pytest_args.extend(args)
+    test_path = args[0]
+    config_path = "config/config.json"
 
-    # Run pytest in-process (enables debugger breakpoints)
-    returncode = pytest.main(pytest_args)
+    for arg in args[1:]:
+        if arg.startswith("--ammtest-config="):
+            config_path = arg.split("=", 1)[1]
 
-    sys.exit(returncode)
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: Config file not found: {config_path}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON in config: {e}")
+        sys.exit(1)
+
+    from .runner import run
+    sys.exit(run(test_path, config, config_path))
 
 
 if __name__ == "__main__":

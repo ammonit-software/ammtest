@@ -16,34 +16,24 @@ CONNECTION_TIMEOUT_MS = 5000
 class AmmioClient:
     """Client for communicating with ammio service."""
 
-    def __init__(self, config_path: str):
+    def __init__(self, endpoint: str):
         """
-        Initialize client from config file.
+        Initialize client and connect to ammio.
 
         Args:
-            config_path: Path to JSON config file
+            endpoint: nng endpoint to connect to (e.g. "tcp://127.0.0.1:5555")
         """
-        self._config = self._load_config(config_path)
+        self._endpoint = endpoint
         self._socket = None
         self._error_codes = {}
         self._connect()
         self._fetch_error_codes()
 
-    def _load_config(self, config_path: str) -> dict:
-        """Load configuration from JSON file."""
-        try:
-            with open(config_path) as f:
-                return json.load(f)
-        except FileNotFoundError:
-            raise AmmioError(f"Config file not found: {config_path}")
-        except json.JSONDecodeError as e:
-            raise AmmioError(f"Invalid JSON in config file: {e}")
-
     def _connect(self) -> None:
         """Establish connection to ammio service with retries."""
-        endpoint = self._config.get("ammio_endpoint")
+        endpoint = self._endpoint
         if not endpoint:
-            raise AmmioError("Config missing 'ammio_endpoint' field")
+            raise AmmioError("No endpoint provided")
 
         last_error = None
         for attempt in range(1, CONNECTION_RETRIES + 1):
@@ -105,15 +95,15 @@ class AmmioClient:
         response = self._send_request({"cmd": "list_vars"})
         return response.get("vars", [])
 
-    def force(
+    def write(
         self, var_id: str, value: Union[int, float, bool], quiet: bool = False
     ) -> None:
         """
-        Force a value into the var_table.
+        Write a value into the var_table.
 
         Args:
             var_id: Variable identifier
-            value: Value to force
+            value: Value to write
 
         Raises:
             AmmioError: If var_id not found or type mismatch
@@ -128,7 +118,7 @@ class AmmioClient:
         )
         self._handle_response(response, var_id)
         if not quiet:
-            logger.info(f"FORCE: {var_id} = {value}")
+            logger.info(f"WRITE: {var_id} = {value}")
 
     def read(self, var_id: str, quiet: bool = False) -> Union[int, float, bool]:
         """
@@ -155,6 +145,10 @@ class AmmioClient:
         if not quiet:
             logger.info(f"READ: {var_id} = {value}")
         return value
+
+    def copy(self) -> "AmmioClient":
+        """Create an independent client connected to the same endpoint."""
+        return AmmioClient(self._endpoint)
 
     def close(self) -> None:
         """Close connection to ammio."""
