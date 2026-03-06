@@ -3,12 +3,12 @@
 </p>
 
 <p align="center">
-  <strong>Python test framework for safety-critical systems. Write, run, and trace system-level tests against any SUT via ammio.</strong>
+  <strong>Python test framework for critical-software systems. Write, run, and trace system-level tests against any System Under Test (SUT).</strong>
 </p>
 
 # ammtest
 
-**ammtest** is a Python test framework for testing safety-critical software systems. It connects to [ammio](https://github.com/ammonit-software/ammio) to interact with the System Under Test — writing inputs, reading outputs, and asserting behavior — with full traceability built in.
+**ammtest** is a Python test framework for testing critical-software systems. It connects to [ammio](https://github.com/ammonit-software/ammio) to interact with the SUT — writing inputs, reading outputs, and asserting behavior — with full traceability built in.
 
 Every test is tagged with metadata (version, description, requirements) and produces a structured `.txt` result file per execution, ready for review or certification evidence.
 
@@ -23,29 +23,54 @@ pip install ammtest
 ### Write a test
 
 ```python
+import time
 from ammtest import ammtest, AmmioClient, AmmTestHelper
 
-@ammtest(
-    version="0.1.0",
-    description="Verify brake engages when request is sent",
-    requirements=["REQ-042"],
-)
+@ammtest(version="0.1.0", description="Brake engages on request", requirements=["REQ-042"])
 def test(cl: AmmioClient, th: AmmTestHelper):
-    cl.write("brake_request", 1)
-    th.check("brake_status", lambda v: v == 1)
-    th.check_stable("brake_status", lambda v: v == 1, duration=2.0)
-    th.check_until("brake_pressure", lambda v: v > 80, timeout=1.0)
-    th.check_at("brake_pressure", lambda v: v > 80, at=0.5, tolerance=0.1)
+    cl.write("brake_request", 1)  # force SUT input via ammio
+    time.sleep(0.5)               # wait for the SUT to react
+    th.check("brake_status", lambda v: v == 1)  # CHECK PASS/FAIL logged, traced to REQ-042
 ```
 
 ### Run
 
 ```bash
-ammtest run tests/
-ammtest run tests/ --ammtest-config=config/config.json
+ammtest run tests/TC_001.py --ammtest-config=config/config.json
 ```
 
-Requires [ammio](https://github.com/ammonit-software/ammio) to be running.
+> Note: requires [ammio](https://github.com/ammonit-software/ammio) to be running.
+
+### Log
+
+```
+================================================================================
+                            AMMTEST EXECUTION REPORT
+================================================================================
+  Date:           2026-03-06
+  Time:           16:43:36
+  Executed by:    jdoe
+  Host:           my-machine
+  Config:         config/config.json
+--------------------------------------------------------------------------------
+  File:           TC_001.py
+  Test:           TC_001::test
+  Version:        0.1.0
+  Description:    Brake engages on request
+  Requirements:   REQ-042
+================================================================================
+
+--- LOG ---
+
+16:43:36.531 INFO     WRITE: brake_request = 1
+16:43:37.033 INFO     CHECK PASS  brake_status = 1  [v == 1]
+
+================================================================================
+--- RESULT ---
+  Status:         PASS
+  Duration:       0.502s
+================================================================================
+```
 
 ## Architecture
 
@@ -54,23 +79,20 @@ Requires [ammio](https://github.com/ammonit-software/ammio) to be running.
 ```
   test functions (@ammtest decorator)
          │
-         │  cl.write("var", value)                    →  force SUT inputs
-         │  th.check("var", lambda v: v == 1)         ←  one-shot check
-         │  th.check_stable("var", lambda v: ..., duration)   stability check
-         │  th.check_until("var", lambda v: ..., timeout)     transition check
-         │  th.check_at("var", lambda v: ..., at, tolerance)  timing check
+         │  cl.write("var", value)                    →  write SUT inputs
+         │  th.check("var", lambda v: v == 1)         ←  one-shot check, reading SUT outputs
          │
-  ┌──────┴──────────────────────────────────────────────────────┐
-  │                          ammtest                            │
-  │  ┌──────────┐  ┌─────────────┐  ┌───────────────────────┐  │
-  │  │ @ammtest │  │ AmmioClient │  │    AmmTestHelper       │  │
-  │  │ metadata │  │ nng REQ/REP │  │  check / check_stable  │  │
-  │  └──────────┘  └──────┬──────┘  │  check_until / check_at│  │
-  │                        │         └───────────────────────┘  │
+  ┌──────┴───────────────────────────────────────────────────────┐
+  │                          ammtest                             │
+  │  ┌──────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+  │  │ @ammtest │  │ AmmioClient │  │    AmmTestHelper        │  │
+  │  │ metadata │  │ nng REQ/REP │  │  check / check_stable   │  │
+  │  └──────────┘  └──────┬──────┘  │  check_until / check_at │  │
+  │                       │         └─────────────────────────┘  │
   │                   runner: discover, run, write results       │
-  └────────────────────────│─────────────────────────────────────┘
-                           │ nng REQ/REP · JSON · TCP
-                           ▼
+  └───────────────────────│──────────────────────────────────────┘
+                          │ nng REQ/REP · JSON · TCP
+                          ▼
                          ammio → SUT
 ```
 
@@ -78,7 +100,7 @@ Requires [ammio](https://github.com/ammonit-software/ammio) to be running.
 
 **`AmmioClient` (`cl`)**: Connects to ammio over nng REQ/REP. `write(var_id, value)` forces SUT inputs; `read(var_id)` observes SUT outputs. Errors from ammio are resolved to human-readable names and raised as `AmmioError`.
 
-**`AmmTestHelper` (`th`)**: Injected as the second argument to each test function. Owns the client and provides four check methods — each reads the variable quietly, evaluates a lambda condition, and emits a single `CHECK PASS` / `CHECK FAIL` log line with the variable name, actual value, and condition expression.
+**`AmmTestHelper` (`th`)**: Injected as the second argument to each test function. Provides four check methods — each reads a variable, evaluates a lambda condition, and emits a `CHECK PASS` / `CHECK FAIL` log line with the variable name, actual value, and condition expression.
 
 | Method | Semantics |
 |--------|-----------|
@@ -91,21 +113,17 @@ Requires [ammio](https://github.com/ammonit-software/ammio) to be running.
 
 ## Configuration
 
-```json
+```jsonc
 {
-    "results_path": "results",
-    "ammio_endpoint": "tcp://127.0.0.1:5555"
+    "tests_path": "examples/tests",          // root used to compute relative paths in result files
+    "results_path": "examples/results",      // directory where .txt result files are written
+    "ammio_endpoint": "tcp://127.0.0.1:5555" // nng endpoint of the running ammio instance
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `results_path` | Directory where `.txt` result files are written |
-| `ammio_endpoint` | nng endpoint of the running ammio instance |
-
 ## Related Projects
 
-- **[ammio](https://github.com/ammonit-software/ammio)**: Protocol-agnostic test interface that ammtest connects to for SUT interaction.
+- **[ammio](https://github.com/ammonit-software/ammio)**: Protocol agnostic test interface for critical-software systems. Talk to any System Under Test (SUT) in JSON, regardless of its protocol.
 - **[Ammonit Software](https://github.com/ammonit-software)**: Parent organization.
 
 ## License
