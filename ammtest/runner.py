@@ -259,8 +259,11 @@ def run(test_path: str, config: dict, config_path: str = "") -> int:
     client = AmmioClient(endpoint)
 
     results = []
-    for rel_path, func in tests:
-        results.append(_run_one(client, rel_path, func, run_dir, ctx))
+    try:
+        for rel_path, func in tests:
+            results.append(_run_one(client, rel_path, func, run_dir, ctx))
+    finally:
+        client.close()
 
     passed = sum(1 for r in results if r["status"] == "PASS")
     failed = len(results) - passed

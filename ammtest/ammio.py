@@ -26,6 +26,7 @@ class AmmioClient:
         self._endpoint = endpoint
         self._socket = None
         self._error_codes = {}
+        self._cleanup_callbacks = []
         self._connect()
         self._fetch_error_codes()
 
@@ -150,8 +151,15 @@ class AmmioClient:
         """Create an independent client connected to the same endpoint."""
         return AmmioClient(self._endpoint)
 
+    def register_cleanup(self, fn) -> None:
+        """Register a callback to be called before this client closes."""
+        self._cleanup_callbacks.append(fn)
+
     def close(self) -> None:
         """Close connection to ammio."""
+        for fn in self._cleanup_callbacks:
+            fn()
+        self._cleanup_callbacks.clear()
         if self._socket is not None:
             self._socket.close()
             self._socket = None
