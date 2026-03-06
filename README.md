@@ -10,7 +10,11 @@
 
 **ammtest** is a Python test framework for testing critical-software systems. It connects to [ammio](https://github.com/ammonit-software/ammio) to interact with the SUT — writing inputs, reading outputs, and asserting behavior — with full traceability built in.
 
-Every test is tagged with metadata (version, description, requirements) and produces a structured `.txt` result file per execution, ready for review or certification evidence.
+It addresses three core pain points in critical systems testing:
+
+- *The evidence problem*: Tests run, tests pass — but certification asks for proof. **ammtest** writes a structured, traceable result file on every execution, automatically. The test itself becomes the specification.
+- *The traceability gap*: Requirements live in one document, tests live in another, and nobody can prove they match. **ammtest** binds them at the source — no spreadsheets, no manual cross-referencing.
+- *The infrastructure tax*: Connecting to a real system takes more code than the test itself. **ammtest** handles the communication layer, so you write stimulus and assertions — nothing else.
 
 ## Quickstart
 
