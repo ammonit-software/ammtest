@@ -1,6 +1,6 @@
 [project]
 name = "ammtest"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python test framework for critical-software systems. Write, run, and trace system-level tests against any System Under Test (SUT)."
 readme = "README.md"
 requires-python = ">=3.12"
