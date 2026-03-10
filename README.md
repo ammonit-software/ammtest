@@ -72,8 +72,8 @@ ammtest run tests/TC_001.py --ammtest-config=config/config.json
   File:           TC_001.py
   Test:           TC_001::test
   Version:        0.1.0
-  Description:    Brake engages on request
-  Requirements:   REQ-042
+  Description:    Check if brake engages on request
+  Requirements:   {'req': 'REQ-1416', 'baseline': 'A'}, {'req': 'REQ-1418', 'baseline': 'B'}
 ================================================================================
 
 --- LOG ---
