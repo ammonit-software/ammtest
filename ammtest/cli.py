@@ -28,7 +28,9 @@ def main():
 
 
 def print_usage():
-    print("ammtest - Test framework for safety-critical systems")
+    print(
+        "ammtest - Python test framework for critical-software systems. Write, run, and trace system-level tests against any System Under Test (SUT)."
+    )
     print()
     print("Usage:")
     print("  ammtest run <path> [options]")
@@ -65,6 +67,7 @@ def run_tests(args):
         sys.exit(1)
 
     from .runner import run
+
     sys.exit(run(test_path, config, config_path))
 
 
