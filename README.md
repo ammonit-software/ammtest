@@ -30,11 +30,23 @@ uv pip install ammtest
 import time
 from ammtest import ammtest, AmmioClient, AmmTestHelper
 
-@ammtest(version="0.1.0", description="Brake engages on request", requirements=["REQ-042"])
+@ammtest(
+    version="0.1.0",
+    description="Check if brake engages on request",
+    requirements=[
+        {"req": "REQ-1416", "baseline": "A"},
+        {"req": "REQ-1418", "baseline": "B"},
+    ],
+)
 def test(cl: AmmioClient, th: AmmTestHelper):
-    cl.write("brake_request", 1)  # force SUT input via ammio
-    time.sleep(0.5)               # wait for the SUT to react
-    th.check("brake_status", lambda v: v == 1)  # CHECK PASS/FAIL logged, traced to REQ-042
+    # Force SUT input via ammio
+    cl.write("brake_request", 1) 
+    
+    # Wait for the SUT to react (0.5s)
+    time.sleep(0.5) 
+    
+    # Check status and log results (traced to REQ-1416/1418)
+    th.check("brake_status", lambda v: v == 1)
 ```
 
 ### Run
