@@ -21,7 +21,7 @@ It addresses three core pain points in critical systems testing:
 ### Install
 
 ```bash
-pip install ammtest
+uv pip install ammtest
 ```
 
 ### Write a test
