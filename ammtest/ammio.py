@@ -113,7 +113,7 @@ class AmmioClient:
         response = self._send_request(
             {
                 "cmd": "write",
-                "name": var_id,
+                "var_id": var_id,
                 "value": value,
             }
         )
@@ -138,7 +138,7 @@ class AmmioClient:
         response = self._send_request(
             {
                 "cmd": "read",
-                "name": var_id,
+                "var_id": var_id,
             }
         )
         self._handle_response(response, var_id)

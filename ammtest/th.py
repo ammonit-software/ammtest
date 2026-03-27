@@ -10,7 +10,7 @@ logger = logging.getLogger("ammtest")
 
 class AmmTestHelper:
     """
-    Test helper — injected into test functions as the second argument.
+    Test helper - injected into test functions as the second argument.
 
     Provides traced assertions and test automation helpers.
 
@@ -21,6 +21,7 @@ class AmmTestHelper:
             th.check_stable("signal", lambda v: v == 1, duration=2.0)
             th.check_until("signal", lambda v: v == 1, timeout=2.0)
             th.check_at("signal", lambda v: v == 1, at=2.0, tolerance=0.1)
+            th.wait(2.0)
 
     Checks are soft: failures are collected and the test continues.
     finalize() is called automatically by the runner at the end.
@@ -118,7 +119,7 @@ class AmmTestHelper:
                 if transition_time < at - tolerance:
                     logger.error(
                         f"CHECK FAIL  {var_id} = {value}  [{expr}]"
-                        f"  too early: {transition_time:.3f}s (expected {at}s ±{tolerance}s)"
+                        f"  too early: {transition_time:.3f}s (expected {at}s +-{tolerance}s)"
                     )
                     self._record_failure(
                         f"check_at failed: {var_id} transitioned too early at {transition_time:.3f}s"
@@ -132,15 +133,21 @@ class AmmTestHelper:
         if transition_time is None:
             logger.error(
                 f"CHECK FAIL  {var_id} = {value}  [{expr}]"
-                f"  no transition within {at}s ±{tolerance}s"
+                f"  no transition within {at}s +-{tolerance}s"
             )
             self._record_failure(f"check_at failed: {var_id} did not transition within expected window")
             return
 
         logger.info(
             f"CHECK PASS  {var_id} = {value}  [{expr}]"
-            f"  transitioned at {transition_time:.3f}s (expected {at}s ±{tolerance}s)"
+            f"  transitioned at {transition_time:.3f}s (expected {at}s +-{tolerance}s)"
         )
+
+    def wait(self, duration: float) -> None:
+        """Sleep for duration seconds, logging start and end."""
+        logger.info(f"WAIT        {duration}s ...")
+        time.sleep(duration)
+        logger.info(f"WAIT        done")
 
     @staticmethod
     def _condition_expr() -> str:

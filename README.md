@@ -27,7 +27,6 @@ uv pip install ammtest
 ### Write a test
 
 ```python
-import time
 from ammtest import ammtest, AmmioClient, AmmTestHelper
 
 @ammtest(
@@ -43,7 +42,7 @@ def test(cl: AmmioClient, th: AmmTestHelper):
     cl.write("brake_request", 1) 
     
     # Wait for the SUT to react (0.5s)
-    time.sleep(0.5) 
+    th.wait(0.5)
     
     # Check status and log results (traced to REQ-1416/1418)
     th.check("brake_status", lambda v: v == 1)
@@ -52,7 +51,7 @@ def test(cl: AmmioClient, th: AmmTestHelper):
 ### Run
 
 ```bash
-ammtest run tests/TC_001.py --ammtest-config=config/config.json
+ammtest run tests/TC_001.py --endpoint=tcp://127.0.0.1:5555
 ```
 
 > Note: requires [ammio](https://github.com/ammonit-software/ammio) to be running.
@@ -67,13 +66,13 @@ ammtest run tests/TC_001.py --ammtest-config=config/config.json
   Time:           16:43:36
   Executed by:    jdoe
   Host:           my-machine
-  Config:         config/config.json
 --------------------------------------------------------------------------------
   File:           TC_001.py
   Test:           TC_001::test
   Version:        0.1.0
   Description:    Check if brake engages on request
-  Requirements:   {'req': 'REQ-1416', 'baseline': 'A'}, {'req': 'REQ-1418', 'baseline': 'B'}
+  Requirements:   req: REQ-1416            baseline: [A]
+                  req: REQ-1418            baseline: [B]
 ================================================================================
 
 --- LOG ---
@@ -116,25 +115,34 @@ ammtest run tests/TC_001.py --ammtest-config=config/config.json
 
 **`AmmioClient` (`cl`)**: Connects to ammio over nng REQ/REP. `write(var_id, value)` forces SUT inputs; `read(var_id)` observes SUT outputs. Errors from ammio are resolved to human-readable names and raised as `AmmioError`.
 
-**`AmmTestHelper` (`th`)**: Injected as the second argument to each test function. Provides four check methods — each reads a variable, evaluates a lambda condition, and emits a `CHECK PASS` / `CHECK FAIL` log line with the variable name, actual value, and condition expression.
+**`AmmTestHelper` (`th`)**: Injected as the second argument to each test function. Provides check methods and a wait helper — each check reads a variable, evaluates a lambda condition, and emits a `CHECK PASS` / `CHECK FAIL` log line with the variable name, actual value, and condition expression.
 
 | Method | Semantics |
 |--------|-----------|
 | `th.check(var, cond)` | Value satisfies condition **right now** |
 | `th.check_stable(var, cond, duration)` | Condition holds for entire `duration` seconds |
 | `th.check_until(var, cond, timeout)` | Condition becomes true **within** `timeout` seconds |
-| `th.check_at(var, cond, at, tolerance)` | Condition first becomes true at `at` ± `tolerance` seconds |
+| `th.check_at(var, cond, at, tolerance)` | Condition first becomes true at `at` +- `tolerance` seconds |
+| `th.wait(duration)` | Sleep for `duration` seconds, logging start and end |
 
-**Runner**: Discovers all `@ammtest` functions under a path, runs each in sequence, writes one `.txt` result file per test. Result files include a full execution header (date, user, host, config, metadata), real-time log output, status, duration, and error details.
+**Runner**: Discovers all `@ammtest` functions under a path, runs each in sequence, writes one `.txt` result file per test. Result files include a full execution header (date, user, host, metadata), real-time log output, status, duration, and error details.
 
-## Configuration
+**Traceability commands**: Two static analysis commands operate on test files without connecting to ammio.
 
-```jsonc
-{
-    "tests_path": "examples/tests",          // root used to compute relative paths in result files
-    "results_path": "examples/results",      // directory where .txt result files are written
-    "ammio_endpoint": "tcp://127.0.0.1:5555" // nng endpoint of the running ammio instance
-}
+| Command | Output |
+|---------|--------|
+| `ammtest trace-tests <path>` | One row per test — which requirements it covers. Flags tests with no requirements. |
+| `ammtest trace-reqs <path> --reqs=<csv> --col=<n>` | One row per requirement from the CSV — which tests cover it. Flags requirements with no test. |
+
+`trace-reqs` options:
+- `--col=<n>` — 1-based column number where requirement IDs are
+- `--skip-header` — skip the first row if the CSV has a header
+- `--delimiter="<char>"` — column separator (default: `,`); quote special characters to avoid shell interpretation
+
+```bash
+ammtest trace-tests tests/
+ammtest trace-reqs tests/ --reqs=requirements.csv --col=1 --skip-header
+ammtest trace-reqs tests/ --reqs=requirements.csv --col=2 --skip-header --delimiter=";"
 ```
 
 ## Related Projects
@@ -145,3 +153,4 @@ ammtest run tests/TC_001.py --ammtest-config=config/config.json
 ## License
 
 This project is open source and available under the [MIT License](LICENSE).
+

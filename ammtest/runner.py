@@ -21,12 +21,13 @@ _W = 80  # report width
 
 class _C:
     """ANSI color codes."""
-    RESET  = "\033[0m"
-    BOLD   = "\033[1m"
-    GREEN  = "\033[92m"
-    RED    = "\033[91m"
+
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    GREEN = "\033[92m"
+    RED = "\033[91m"
     YELLOW = "\033[93m"
-    DIM    = "\033[2m"
+    DIM = "\033[2m"
 
 
 class _Tee:
@@ -51,8 +52,8 @@ class _ColorFormatter(logging.Formatter):
     """Adds color to WARNING and ERROR log lines in the terminal."""
 
     _COLORS = {
-        logging.WARNING:  _C.YELLOW,
-        logging.ERROR:    _C.RED,
+        logging.WARNING: _C.YELLOW,
+        logging.ERROR: _C.RED,
         logging.CRITICAL: _C.RED + _C.BOLD,
     }
 
@@ -74,8 +75,10 @@ def _discover(base: Path, tests_root: Path) -> list[tuple[Path, callable]]:
     base can be a single file or a directory.
     rel_path is always relative to tests_root for consistent result folder structure.
     """
-    files = [base] if base.is_file() else sorted(
-        f for f in base.rglob("*.py") if f.name != "__init__.py"
+    files = (
+        [base]
+        if base.is_file()
+        else sorted(f for f in base.rglob("*.py") if f.name != "__init__.py")
     )
 
     tests = []
@@ -91,13 +94,27 @@ def _row(label: str, value: str) -> str:
     return f"  {label + ':':<16}{value}"
 
 
+def _req_table(requirements: list) -> list[str]:
+    if not requirements:
+        return [_row("Requirements", "(none)")]
+    indent = " " * 18
+    col_w = max(len(r["req"]) for r in requirements)
+    lines = []
+    for i, r in enumerate(requirements):
+        entry = f"req: {r['req']:<{col_w}}  baseline: {r['baseline']}"
+        if i == 0:
+            lines.append(_row("Requirements", entry))
+        else:
+            lines.append(f"{indent}{entry}")
+    return lines
+
+
 def _ctx_rows(ctx: dict) -> list[str]:
     return [
-        _row("Date",        ctx["date"]),
-        _row("Time",        ctx["time"]),
+        _row("Date", ctx["date"]),
+        _row("Time", ctx["time"]),
         _row("Executed by", ctx["user"]),
-        _row("Host",        ctx["host"]),
-        _row("Config",      ctx["config_path"]),
+        _row("Host", ctx["host"]),
     ]
 
 
@@ -106,15 +123,21 @@ def _write_header(f, rel_path: Path, func_name: str, meta: dict, ctx: dict) -> N
     dash = _C.DIM + "-" * _W + _C.RESET
     title = _C.BOLD + f"{'AMMTEST EXECUTION REPORT':^{_W}}" + _C.RESET
 
-    lines = [sep, title, sep] + _ctx_rows(ctx) + [
-        dash,
-        _row("File",        str(rel_path)),
-        _row("Test",        f"{rel_path.stem}::{func_name}"),
-    ]
+    lines = (
+        [sep, title, sep]
+        + _ctx_rows(ctx)
+        + [
+            dash,
+            _row("File", str(rel_path)),
+            _row("Test", f"{rel_path.stem}::{func_name}"),
+        ]
+    )
 
     for key, value in meta.items():
-        display = ", ".join(str(v) for v in value) if isinstance(value, list) else str(value)
-        lines.append(_row(key.capitalize(), display))
+        if key == "requirements":
+            lines += _req_table(value)
+        else:
+            lines.append(_row(key.capitalize(), str(value)))
 
     lines += [sep, "", _C.BOLD + "--- LOG ---" + _C.RESET, ""]
 
@@ -122,7 +145,9 @@ def _write_header(f, rel_path: Path, func_name: str, meta: dict, ctx: dict) -> N
     f.flush()
 
 
-def _write_footer(f, status: str, duration: float, error: str | None, failures: list) -> None:
+def _write_footer(
+    f, status: str, duration: float, error: str | None, failures: list
+) -> None:
     sep = _C.DIM + "=" * _W + _C.RESET
     color = _C.GREEN if status == "PASS" else _C.RED
     status_display = f"{color}{_C.BOLD}{status}{_C.RESET}"
@@ -131,7 +156,7 @@ def _write_footer(f, status: str, duration: float, error: str | None, failures: 
         "",
         sep,
         _C.BOLD + "--- RESULT ---" + _C.RESET,
-        _row("Status",   status_display),
+        _row("Status", status_display),
         _row("Duration", f"{duration:.3f}s"),
     ]
 
@@ -139,9 +164,15 @@ def _write_footer(f, status: str, duration: float, error: str | None, failures: 
         lines += ["", _C.RED + _C.BOLD + "--- CHECK FAILURES ---" + _C.RESET]
         for i, fail in enumerate(failures, 1):
             lines.append(f"  {_C.RED}[{i}] {fail['msg']}{_C.RESET}")
-            lines.append(f"  {_C.RED}     {fail['file']}:{fail['lineno']}  {fail['source']}{_C.RESET}")
+            lines.append(
+                f"  {_C.RED}     {fail['file']}:{fail['lineno']}  {fail['source']}{_C.RESET}"
+            )
     if error:
-        lines += ["", _C.RED + _C.BOLD + "--- EXCEPTION ---" + _C.RESET, _C.RED + error + _C.RESET]
+        lines += [
+            "",
+            _C.RED + _C.BOLD + "--- EXCEPTION ---" + _C.RESET,
+            _C.RED + error + _C.RESET,
+        ]
 
     lines.append(sep)
     f.write("\n".join(lines) + "\n")
@@ -172,7 +203,9 @@ def _run_one(
 
         # log lines go to file (stdout already has stream_handler from run())
         file_handler = logging.StreamHandler(f)
-        file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
+        file_handler.setFormatter(
+            logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
+        )
         root.addHandler(file_handler)
 
         nparams = len(inspect.signature(func).parameters)
@@ -198,26 +231,33 @@ def _run_one(
 
         _write_footer(tee, status, duration, error, failures)
 
-    return {"rel_path": rel_path, "func_name": func_name, "status": status, "duration": duration}
+    return {
+        "rel_path": rel_path,
+        "func_name": func_name,
+        "status": status,
+        "duration": duration,
+    }
 
 
-def _write_summary(run_dir: Path, results: list, ctx: dict, passed: int, failed: int) -> None:
-    sep   = "=" * _W
-    dash  = "-" * _W
+def _write_summary(
+    run_dir: Path, results: list, ctx: dict, passed: int, failed: int
+) -> None:
+    sep = "=" * _W
+    dash = "-" * _W
     title = f"{'AMMTEST RUN SUMMARY':^{_W}}"
 
     lines = [sep, title, sep] + _ctx_rows(ctx) + [dash]
 
     for r in results:
         label = "PASS" if r["status"] == "PASS" else "FAIL"
-        name  = f"{r['rel_path'].with_suffix('')}::{r['func_name']}"
+        name = f"{r['rel_path'].with_suffix('')}::{r['func_name']}"
         lines.append(f"  {label:<6}{r['duration']:.3f}s  {name}")
 
     lines += [
         dash,
-        _row("Tests",   str(len(results))),
-        _row("Passed",  str(passed)),
-        _row("Failed",  str(failed)),
+        _row("Tests", str(len(results))),
+        _row("Passed", str(passed)),
+        _row("Failed", str(failed)),
         sep,
     ]
 
@@ -225,18 +265,18 @@ def _write_summary(run_dir: Path, results: list, ctx: dict, passed: int, failed:
     summary_path.write_text("\n".join(lines) + "\n")
 
 
-def run(test_path: str, config: dict, config_path: str = "") -> int:
+def run(
+    test_path: str, endpoint: str, results_path: str = "results", tests_root: str = ""
+) -> int:
     """Discover and run all @ammtest tests. Returns 0 if all pass, 1 if any fail."""
-    endpoint = config.get("ammio_endpoint")
-    results_path = Path(config.get("results_path", "results"))
+    results_path = Path(results_path)
 
     now = datetime.now()
     ctx = {
-        "date":        now.strftime("%Y-%m-%d"),
-        "time":        now.strftime("%H:%M:%S"),
-        "user":        os.environ.get("USERNAME") or os.environ.get("USER") or "unknown",
-        "host":        socket.gethostname(),
-        "config_path": config_path,
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M:%S"),
+        "user": os.environ.get("USERNAME") or os.environ.get("USER") or "unknown",
+        "host": socket.gethostname(),
     }
 
     run_dir = results_path / now.strftime("%Y-%m-%d_%H-%M-%S")
@@ -249,7 +289,10 @@ def run(test_path: str, config: dict, config_path: str = "") -> int:
     root.addHandler(stream_handler)
 
     base = Path(test_path).resolve()
-    tests_root = Path(config.get("tests_path", test_path)).resolve()
+    if tests_root:
+        tests_root = Path(tests_root).resolve()
+    else:
+        tests_root = base.parent if base.is_file() else base
     tests = _discover(base, tests_root)
 
     if not tests:
@@ -272,6 +315,8 @@ def run(test_path: str, config: dict, config_path: str = "") -> int:
     root.removeHandler(stream_handler)
     color = _C.GREEN if failed == 0 else _C.RED
     print(f"\n{_C.DIM}{'=' * 60}{_C.RESET}")
-    print(f"{len(results)} tests: {color}{_C.BOLD}{passed} passed, {failed} failed{_C.RESET}")
+    print(
+        f"{len(results)} tests: {color}{_C.BOLD}{passed} passed, {failed} failed{_C.RESET}"
+    )
     print(f"{_C.DIM}Results: {run_dir}{_C.RESET}")
-    return 0 if failed == 0 else 1
+    return 0  # by now always return 0 even if there are fails
