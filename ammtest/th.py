@@ -33,13 +33,22 @@ class AmmTestHelper:
 
     def _record_failure(self, msg: str) -> None:
         """Capture caller location and append failure to the list."""
+        import linecache
         frame = inspect.stack()[2]  # 0=_record_failure, 1=check_*, 2=test function
-        source = frame.code_context[0].strip() if frame.code_context else "?"
+        # Accumulate lines until parentheses are balanced (handles multi-line calls).
+        source = ""
+        for i in range(frame.lineno, frame.lineno + 10):
+            line = linecache.getline(frame.filename, i).strip()
+            if not line:
+                break
+            source = (source + " " + line).strip() if source else line
+            if source.count("(") > 0 and source.count("(") == source.count(")"):
+                break
         self._failures.append({
             "msg": msg,
             "file": frame.filename,
             "lineno": frame.lineno,
-            "source": source,
+            "source": source or "?",
         })
 
     def finalize(self) -> None:
@@ -151,16 +160,58 @@ class AmmTestHelper:
 
     @staticmethod
     def _condition_expr() -> str:
-        """Extract the lambda body from the caller's source line."""
+        """Extract the lambda body from the caller's source, handling multi-line calls."""
+        import linecache
         frame = inspect.stack()[2]  # 0=_condition_expr, 1=check_*, 2=test function
         if not frame.code_context:
             return "unknown"
-        source = frame.code_context[0].strip()
+
+        # Accumulate lines until parentheses are balanced (handles multi-line calls).
+        source = ""
+        for i in range(frame.lineno, frame.lineno + 10):
+            line = linecache.getline(frame.filename, i).strip()
+            if not line:
+                break
+            source = (source + " " + line).strip() if source else line
+            if source.count("(") > 0 and source.count("(") == source.count(")"):
+                break
+
+        if not source:
+            return "unknown"
+
         try:
-            args = source[source.index("(") + 1 : source.rindex(")")].strip()
+            # Find the argument list inside the outermost call parentheses.
+            depth, start, end = 0, -1, -1
+            for i, ch in enumerate(source):
+                if ch == "(":
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+
+            if start == -1 or end == -1:
+                return source
+
+            args = source[start + 1 : end].strip()
             if "lambda" in args:
-                lambda_body = args[args.index("lambda"):]
-                return lambda_body[lambda_body.index(":") + 1:].strip()
+                lambda_part = args[args.index("lambda"):]
+                body = lambda_part[lambda_part.index(":") + 1:]
+                # Stop at the first top-level comma (next argument after the lambda).
+                depth2 = 0
+                body_end = len(body)
+                for j, ch in enumerate(body):
+                    if ch in "([{":
+                        depth2 += 1
+                    elif ch in ")]}":
+                        depth2 -= 1
+                    elif ch == "," and depth2 == 0:
+                        body_end = j
+                        break
+                return body[:body_end].strip()
             return args
         except ValueError:
             return source
