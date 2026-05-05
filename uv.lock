@@ -1,9 +1,10 @@
 version = 1
+revision = 1
 requires-python = ">=3.12"
 
 [[package]]
 name = "ammtest"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "pynng" },
@@ -21,6 +22,7 @@ requires-dist = [
     { name = "pytest", specifier = ">=8.0,<9.0" },
     { name = "pytest-html", marker = "extra == 'html'", specifier = ">=4.0,<5.0" },
 ]
+provides-extras = ["html"]
 
 [[package]]
 name = "cffi"
