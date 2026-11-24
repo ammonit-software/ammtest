@@ -19,7 +19,7 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
 
 
 def _cmd_run(args) -> int:
-    return run(args.path, args.endpoint, args.results)
+    return run(args.path, args.endpoint, args.results, args.verbose)
 
 
 def _cmd_vars(args) -> int:
@@ -110,9 +110,10 @@ def _parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True, metavar="command")
 
     r = sub.add_parser("run", allow_abbrev=False, help="run tests and write evidence reports")
-    r.add_argument("path", help="test file or folder")
+    r.add_argument("path", help="test file, folder, or file::test_name")
     r.add_argument("-e", "--endpoint", default=default_endpoint, help=endpoint_help)
     r.add_argument("-r", "--results", default="results", help="results folder (default: results)")
+    r.add_argument("-v", "--verbose", action="store_true", help="stream the full report to the terminal")
     r.set_defaults(func=_cmd_run)
 
     v = sub.add_parser("vars", allow_abbrev=False, help="list the variables ammio exposes")
@@ -128,7 +129,7 @@ def _parser() -> argparse.ArgumentParser:
         "(fails if one is not covered or a test references an id missing from the CSV). "
         "Does not connect to ammio.",
     )
-    t.add_argument("path", help="test file or folder")
+    t.add_argument("path", help="test file, folder, or file::test_name")
     t.add_argument("--reqs", metavar="CSV", help="requirements file (CSV or one id per line)")
     t.add_argument("--col", type=int, default=1, help="1-based column holding the ids (default: 1)")
     t.add_argument("--delimiter", default=",", help="CSV delimiter (default: ,)")

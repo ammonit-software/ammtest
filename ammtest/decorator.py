@@ -1,4 +1,8 @@
-"""The @ammtest decorator: marks a function as a test and attaches its trace data."""
+"""The @ammtest decorator: marks a function as a test and attaches its trace data.
+
+There is no manual version field: each report identifies the exact test that ran
+by the SHA-256 of its file and the git commit, which cannot drift.
+"""
 
 from dataclasses import dataclass
 
@@ -7,23 +11,21 @@ META_ATTR = "__ammtest__"
 
 @dataclass(frozen=True)
 class Metadata:
-    version: str
     description: str
     requirements: dict[str, str]  # requirement id -> baseline
 
 
-def ammtest(*, version: str = "", description: str = "", requirements: dict[str, str] | None = None):
+def ammtest(*, description: str = "", requirements: dict[str, str] | None = None):
     """Mark a function as an ammtest test case.
 
     @ammtest(
-        version="1.0",
         description="Brake engages on request",
         requirements={"REQ-1416": "A", "REQ-1418": "B"},  # id -> baseline
     )
     def test_brake(sut): ...
     """
-    if not isinstance(version, str) or not isinstance(description, str):
-        raise TypeError("@ammtest: version and description must be strings")
+    if not isinstance(description, str):
+        raise TypeError("@ammtest: description must be a string")
     reqs = {} if requirements is None else requirements
     if not isinstance(reqs, dict):
         raise TypeError(
@@ -35,7 +37,7 @@ def ammtest(*, version: str = "", description: str = "", requirements: dict[str,
             raise TypeError(
                 f"@ammtest: requirement ids and baselines must be strings, got {req!r}: {baseline!r}"
             )
-    meta = Metadata(version, description, dict(reqs))
+    meta = Metadata(description, dict(reqs))
 
     def decorator(func):
         setattr(func, META_ATTR, meta)

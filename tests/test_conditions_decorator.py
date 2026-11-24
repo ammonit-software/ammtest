@@ -44,12 +44,12 @@ def test_invalid_conditions():
 
 
 def test_decorator_attaches_metadata():
-    @ammtest(version="1.0", description="d", requirements={"REQ-1": "A", "REQ-2": ""})
+    @ammtest(description="d", requirements={"REQ-1": "A", "REQ-2": ""})
     def t(sut):
         pass
 
     meta = getattr(t, META_ATTR)
-    assert (meta.version, meta.description, meta.requirements) == ("1.0", "d", {"REQ-1": "A", "REQ-2": ""})
+    assert (meta.description, meta.requirements) == ("d", {"REQ-1": "A", "REQ-2": ""})
 
 
 @pytest.mark.parametrize(
@@ -58,7 +58,8 @@ def test_decorator_attaches_metadata():
         {"requirements": [{"req": "REQ-1", "baseline": "A"}]},
         {"requirements": {"": "A"}},
         {"requirements": {"REQ-1": 1}},
-        {"version": 1},
+        {"description": 1},
+        {"version": "1.0"},  # removed: the file hash and git commit identify the test
     ],
 )
 def test_decorator_rejects_bad_metadata(kwargs):
@@ -68,4 +69,4 @@ def test_decorator_rejects_bad_metadata(kwargs):
 
 def test_decorator_is_keyword_only():
     with pytest.raises(TypeError):
-        ammtest("1.0")
+        ammtest("description")

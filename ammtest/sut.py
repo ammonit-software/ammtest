@@ -1,18 +1,56 @@
 """Sut: the single object every test receives. Drive inputs, check outputs."""
 
+import difflib
 import linecache
+import math
 import os
+import struct
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .client import AmmioClient, Value
+from .client import AmmioClient, AmmioError, Value
 from .conditions import as_condition
 
 POLL_INTERVAL = 0.01  # seconds between samples in timed checks
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ammio stores a written value with a plain C cast: out-of-range integers wrap
+# and decimals are truncated without any error. Refuse those writes instead.
+INT_RANGES = {
+    "uint8": (0, 2**8 - 1),
+    "int8": (-(2**7), 2**7 - 1),
+    "uint16": (0, 2**16 - 1),
+    "int16": (-(2**15), 2**15 - 1),
+    "uint32": (0, 2**32 - 1),
+    "int32": (-(2**31), 2**31 - 1),
+}
+
+
+def stored_value(var_id: str, vtype: str | None, value: Value) -> Value:
+    """The value ammio will actually hold after writing `value` to a `vtype` variable.
+
+    Raises ValueError for writes ammio would silently corrupt.
+    """
+    if isinstance(value, bool):
+        value = int(value)
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"cannot write {value!r} to {var_id!r}: a finite number is required")
+    if vtype in INT_RANGES:
+        low, high = INT_RANGES[vtype]
+        if value != int(value):
+            raise ValueError(f"cannot write {value!r} to {var_id!r}: {vtype} only holds whole numbers")
+        if not low <= value <= high:
+            raise ValueError(f"cannot write {value!r} to {var_id!r}: {vtype} range is [{low}, {high}]")
+        return int(value)
+    if vtype == "float32":
+        try:
+            return struct.unpack("<f", struct.pack("<f", value))[0]
+        except OverflowError:
+            raise ValueError(f"cannot write {value!r} to {var_id!r}: out of float32 range") from None
+    return value
 
 Log = Callable[..., None]
 
@@ -50,18 +88,29 @@ class Sut:
     def __init__(self, client: AmmioClient, log: Log = _print_log):
         self._client = client
         self._log = log
+        self._vars: dict[str, dict] = {}  # ammio's variable table, fetched on first use
         self.failures: list[Failure] = []
         self.passed = 0
 
     # --- I/O -------------------------------------------------------------
 
     def write(self, var_id: str, value: Value) -> None:
-        """Force SUT input `var_id` to `value`."""
+        """Force SUT input `var_id` to `value`.
+
+        Refused (ERROR) if `var_id` is a SUT output, or if the variable's type
+        cannot hold `value` exactly (ammio would wrap or truncate it silently).
+        """
+        info = self._var(var_id)
+        if info.get("dir") == "output":
+            raise AmmioError(f"cannot write {var_id!r}: it is a SUT output (read-only)")
+        stored = stored_value(var_id, info.get("type"), value)
         self._client.write(var_id, value)
-        self._log(f"WRITE  {var_id} = {value!r}")
+        note = "" if repr(stored) == repr(value) else f"  (stored as {info.get('type')} {stored!r})"
+        self._log(f"WRITE  {var_id} = {value!r}{note}")
 
     def read(self, var_id: str) -> Value:
         """Read `var_id` and log it (no verdict)."""
+        self._var(var_id)
         value = self._client.read(var_id)
         self._log(f"READ   {var_id} = {value!r}")
         return value
@@ -80,6 +129,7 @@ class Sut:
 
     def check(self, var_id: str, expected: Any) -> bool:
         """`var_id` satisfies `expected` right now."""
+        self._var(var_id)
         cond = as_condition(expected)
         value = self._client.read(var_id)
         return self._verdict("check", cond(value), f"{var_id} = {value!r}  [{cond}]")
@@ -87,6 +137,7 @@ class Sut:
     def check_until(self, var_id: str, expected: Any, timeout: float, interval: float = POLL_INTERVAL) -> bool:
         """`var_id` satisfies `expected` at some point within `timeout` seconds."""
         _nonneg("timeout", timeout)
+        self._var(var_id)
         cond = as_condition(expected)
         start = time.monotonic()
         while True:
@@ -108,6 +159,7 @@ class Sut:
     def check_stable(self, var_id: str, expected: Any, duration: float, interval: float = POLL_INTERVAL) -> bool:
         """`var_id` satisfies `expected` continuously for `duration` seconds."""
         _nonneg("duration", duration)
+        self._var(var_id)
         cond = as_condition(expected)
         start = time.monotonic()
         while True:
@@ -134,6 +186,7 @@ class Sut:
         """
         _nonneg("at", at)
         _nonneg("tolerance", tolerance)
+        self._var(var_id)
         cond = as_condition(expected)
         window = f"expected {at}s +- {tolerance}s"
         start = time.monotonic()
@@ -159,6 +212,26 @@ class Sut:
             time.sleep(min(interval, at + tolerance - elapsed))
 
     # --- internals -------------------------------------------------------
+
+    def _var(self, var_id: str) -> dict:
+        """ammio's description of `var_id`; unknown names fail with a suggestion."""
+        info = self._vars.get(var_id)
+        if info is None:  # first use, or the table changed: refresh once
+            self._vars = {v["var_id"]: v for v in self._client.list_vars()}
+            info = self._vars.get(var_id)
+        if info is None:
+            close = difflib.get_close_matches(str(var_id), list(self._vars), n=1)
+            hint = f" (did you mean {close[0]!r}?)" if close else ""
+            raise AmmioError(f"unknown variable {var_id!r}{hint}")
+        return info
+
+    def _snapshot(self) -> list[tuple[str, str, str, Value]]:
+        """(var_id, type, dir, value) for every variable, sorted by name. Reads are sequential."""
+        self._vars = {v["var_id"]: v for v in self._client.list_vars()}
+        return [
+            (var_id, str(info.get("type", "")), str(info.get("dir", "")), self._client.read(var_id))
+            for var_id, info in sorted(self._vars.items())
+        ]
 
     def _verdict(self, kind: str, ok: bool, detail: str) -> bool:
         if ok:

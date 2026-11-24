@@ -79,7 +79,9 @@ class AmmioClient:
         return reply["value"]
 
     def write(self, var_id: str, value: Value) -> None:
-        """Force `var_id` to `value`."""
+        """Force `var_id` to `value`. ammio only takes numbers, so booleans are sent as 1/0."""
+        if isinstance(value, bool):
+            value = int(value)
         self._request({"cmd": "write", "var_id": var_id, "value": value})
 
     def list_vars(self) -> list[dict]:
