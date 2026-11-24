@@ -1,322 +1,404 @@
+"""Discovery, execution and evidence reports.
+
+Exit codes: 0 all tests passed, 1 a test failed or errored, 2 the run could not
+be completed (collection error, no tests, ammio unreachable or lost, Ctrl+C).
+"""
+
+import getpass
+import hashlib
 import importlib.util
 import inspect
-import logging
+import json
 import os
+import platform
 import re
 import socket
 import sys
 import time
 import traceback
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .ammio import AmmioClient
-from .exceptions import _CheckFailures
-from .th import AmmTestHelper
+from . import __version__
+from .client import AmmioClient, AmmioConnectionError
+from .decorator import META_ATTR, Metadata
+from .sut import Failure, Sut
 
-_LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s %(message)s"
-_LOG_DATE_FORMAT = "%H:%M:%S"
-_W = 80  # report width
+EXIT_PASS, EXIT_FAIL, EXIT_ERROR = 0, 1, 2
+_W = 80
+
+
+class CollectionError(Exception):
+    """Tests could not be collected; nothing is run."""
+
+
+# --- discovery ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Case:
+    id: str  # "sub/TC_001.py::test_brake"
+    rel: Path  # file path relative to the tests root
+    func: Callable
+    meta: Metadata
+    sha256: str  # of the test file, as executed
+
+
+def discover(path: str | Path) -> list[Case]:
+    """Collect every @ammtest function under `path` (a file or a folder).
+
+    In folders, files and folders whose name starts with "." or "_" are skipped
+    (use `_helpers.py` for shared code). Files are taken in sorted order,
+    tests in definition order.
+    """
+    path = Path(path).resolve()
+    if not path.exists():
+        raise CollectionError(f"path not found: {path}")
+    root = path if path.is_dir() else path.parent
+    if path.is_file():
+        files = [path]
+    else:
+        files = sorted(
+            f for f in path.rglob("*.py")
+            if not any(part.startswith((".", "_")) for part in f.relative_to(root).parts)
+        )
+    cases = []
+    for file in files:
+        cases += _collect(file, root)
+    return cases
+
+
+def _collect(file: Path, root: Path) -> list[Case]:
+    rel = file.relative_to(root)
+    for folder in (str(root), str(file.parent)):  # lets tests import their helpers
+        if folder not in sys.path:
+            sys.path.insert(0, folder)
+
+    name = "ammtest_suite_" + re.sub(r"\W", "_", rel.with_suffix("").as_posix())
+    source = file.read_bytes()
+    spec = importlib.util.spec_from_file_location(name, file)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as e:
+        sys.modules.pop(name, None)
+        raise CollectionError(f"cannot import {rel.as_posix()}:\n{''.join(traceback.format_exception(e))}") from e
+
+    digest = hashlib.sha256(source).hexdigest()
+    cases = []
+    for obj in vars(module).values():
+        meta = getattr(obj, META_ATTR, None)
+        if not (inspect.isfunction(obj) and isinstance(meta, Metadata) and obj.__module__ == name):
+            continue
+        case_id = f"{rel.as_posix()}::{obj.__name__}"
+        nparams = len(inspect.signature(obj).parameters)
+        if nparams != 1:
+            raise CollectionError(f"{case_id}: a test takes exactly one argument (sut), it takes {nparams}")
+        cases.append(Case(case_id, rel, obj, meta, digest))
+    return cases
+
+
+# --- output ------------------------------------------------------------------
 
 
 class _C:
-    """ANSI color codes."""
-
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    GREEN = "\033[92m"
-    RED = "\033[91m"
-    YELLOW = "\033[93m"
-    DIM = "\033[2m"
+    RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
+    GREEN, RED, YELLOW = "\033[92m", "\033[91m", "\033[93m"
 
 
-class _Tee:
-    """Writes to terminal (with colors) and file (ANSI stripped) simultaneously."""
+_STYLES = {
+    "pass": _C.GREEN,
+    "fail": _C.RED,
+    "PASS": _C.GREEN + _C.BOLD,
+    "FAIL": _C.RED + _C.BOLD,
+    "ERROR": _C.YELLOW + _C.BOLD,
+    "bold": _C.BOLD,
+    "dim": _C.DIM,
+}
 
-    _ANSI = re.compile(r"\033\[[0-9;]*m")
 
-    def __init__(self, file, term):
+def _use_color() -> bool:
+    return sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+
+class _Out:
+    """Writes each line plain to the report file and (optionally colored) to the terminal."""
+
+    def __init__(self, file=None, color: bool = False):
         self.file = file
-        self.term = term
+        self.color = color
 
-    def write(self, data):
-        self.file.write(self._ANSI.sub("", data))
-        self.term.write(data)
-
-    def flush(self):
-        self.file.flush()
-        self.term.flush()
-
-
-class _ColorFormatter(logging.Formatter):
-    """Adds color to WARNING and ERROR log lines in the terminal."""
-
-    _COLORS = {
-        logging.WARNING: _C.YELLOW,
-        logging.ERROR: _C.RED,
-        logging.CRITICAL: _C.RED + _C.BOLD,
-    }
-
-    def format(self, record):
-        msg = super().format(record)
-        color = self._COLORS.get(record.levelno, "")
-        return f"{color}{msg}{_C.RESET}" if color else msg
+    def line(self, text: str = "", style: str = "") -> None:
+        if self.file is not None:
+            self.file.write(text + "\n")
+            self.file.flush()
+        if self.color and style:
+            text = f"{_STYLES[style]}{text}{_C.RESET}"
+        print(text, flush=True)
 
 
-def _import_module(file_path: Path):
-    spec = importlib.util.spec_from_file_location(file_path.stem, file_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _discover(base: Path, tests_root: Path) -> list[tuple[Path, callable]]:
-    """Return (relative_path, func) for every @ammtest-decorated function under base.
-    base can be a single file or a directory.
-    rel_path is always relative to tests_root for consistent result folder structure.
-    """
-    files = (
-        [base]
-        if base.is_file()
-        else sorted(f for f in base.rglob("*.py") if f.name != "__init__.py")
-    )
-
-    tests = []
-    for file_path in files:
-        module = _import_module(file_path)
-        for _, func in inspect.getmembers(module, inspect.isfunction):
-            if hasattr(func, "_ammtest_meta"):
-                tests.append((file_path.relative_to(tests_root), func))
-    return tests
-
-
-def _row(label: str, value: str) -> str:
+def _kv(label: str, value: object) -> str:
     return f"  {label + ':':<16}{value}"
 
 
-def _req_table(requirements: list) -> list[str]:
-    if not requirements:
-        return [_row("Requirements", "(none)")]
-    indent = " " * 18
-    col_w = max(len(r["req"]) for r in requirements)
-    lines = []
-    for i, r in enumerate(requirements):
-        entry = f"req: {r['req']:<{col_w}}  baseline: {r['baseline']}"
-        if i == 0:
-            lines.append(_row("Requirements", entry))
-        else:
-            lines.append(f"{indent}{entry}")
-    return lines
+def _req_lines(reqs: dict[str, str]) -> list[str]:
+    if not reqs:
+        return [_kv("Requirements", "(none)")]
+    width = max(map(len, reqs))
+    lines = [f"{req:<{width}}  [{baseline or '-'}]" for req, baseline in reqs.items()]
+    return [_kv("Requirements", lines[0])] + [" " * 18 + line for line in lines[1:]]
 
 
-def _ctx_rows(ctx: dict) -> list[str]:
-    return [
-        _row("Date", ctx["date"]),
-        _row("Time", ctx["time"]),
-        _row("Executed by", ctx["user"]),
-        _row("Host", ctx["host"]),
-    ]
+# --- execution ---------------------------------------------------------------
 
 
-def _write_header(f, rel_path: Path, func_name: str, meta: dict, ctx: dict) -> None:
-    sep = _C.DIM + "=" * _W + _C.RESET
-    dash = _C.DIM + "-" * _W + _C.RESET
-    title = _C.BOLD + f"{'AMMTEST EXECUTION REPORT':^{_W}}" + _C.RESET
-
-    lines = (
-        [sep, title, sep]
-        + _ctx_rows(ctx)
-        + [
-            dash,
-            _row("File", str(rel_path)),
-            _row("Test", f"{rel_path.stem}::{func_name}"),
-        ]
-    )
-
-    for key, value in meta.items():
-        if key == "requirements":
-            lines += _req_table(value)
-        else:
-            lines.append(_row(key.capitalize(), str(value)))
-
-    lines += [sep, "", _C.BOLD + "--- LOG ---" + _C.RESET, ""]
-
-    f.write("\n".join(lines) + "\n")
-    f.flush()
+@dataclass
+class _Outcome:
+    case: Case
+    status: str  # PASS | FAIL | ERROR
+    started: datetime
+    duration: float
+    checks_passed: int
+    checks_failed: int
+    report: Path
+    abort: str | None = None
 
 
-def _write_footer(
-    f, status: str, duration: float, error: str | None, failures: list
-) -> None:
-    sep = _C.DIM + "=" * _W + _C.RESET
-    color = _C.GREEN if status == "PASS" else _C.RED
-    status_display = f"{color}{_C.BOLD}{status}{_C.RESET}"
-
-    lines = [
-        "",
-        sep,
-        _C.BOLD + "--- RESULT ---" + _C.RESET,
-        _row("Status", status_display),
-        _row("Duration", f"{duration:.3f}s"),
-    ]
-
-    if failures:
-        lines += ["", _C.RED + _C.BOLD + "--- CHECK FAILURES ---" + _C.RESET]
-        for i, fail in enumerate(failures, 1):
-            lines.append(f"  {_C.RED}[{i}] {fail['msg']}{_C.RESET}")
-            lines.append(
-                f"  {_C.RED}     {fail['file']}:{fail['lineno']}  {fail['source']}{_C.RESET}"
-            )
-    if error:
-        lines += [
-            "",
-            _C.RED + _C.BOLD + "--- EXCEPTION ---" + _C.RESET,
-            _C.RED + error + _C.RESET,
-        ]
-
-    lines.append(sep)
-    f.write("\n".join(lines) + "\n")
-    f.flush()
-
-
-def _run_one(
-    client: AmmioClient,
-    rel_path: Path,
-    func: callable,
-    run_dir: Path,
-    ctx: dict,
-) -> dict:
-    meta = func._ammtest_meta
-    func_name = func.__name__
-
-    output_name = f"{rel_path.stem}_{func_name}.txt"
-    output_path = run_dir / rel_path.parent / output_name
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    root = logging.getLogger()
-    status = "PASS"
-    error = None
-
-    with open(output_path, "w") as f:
-        tee = _Tee(f, sys.stdout)
-        _write_header(tee, rel_path, func_name, meta, ctx)
-
-        # log lines go to file (stdout already has stream_handler from run())
-        file_handler = logging.StreamHandler(f)
-        file_handler.setFormatter(
-            logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
-        )
-        root.addHandler(file_handler)
-
-        nparams = len(inspect.signature(func).parameters)
-        th = AmmTestHelper(client) if nparams >= 2 else None
-        args = (client, th) if th is not None else (client,)
-
-        failures = []
-        start = time.monotonic()
-        try:
-            func(*args)
-            if th is not None:
-                th.finalize()
-        except _CheckFailures as e:
-            status = "FAIL"
-            failures = e.failures
-        except Exception:
-            # hard runtime error — preserve full traceback
-            status = "FAIL"
-            error = traceback.format_exc()
-        finally:
-            duration = time.monotonic() - start
-            root.removeHandler(file_handler)
-
-        _write_footer(tee, status, duration, error, failures)
-
-    return {
-        "rel_path": rel_path,
-        "func_name": func_name,
-        "status": status,
-        "duration": duration,
-    }
-
-
-def _write_summary(
-    run_dir: Path, results: list, ctx: dict, passed: int, failed: int
-) -> None:
-    sep = "=" * _W
-    dash = "-" * _W
-    title = f"{'AMMTEST RUN SUMMARY':^{_W}}"
-
-    lines = [sep, title, sep] + _ctx_rows(ctx) + [dash]
-
-    for r in results:
-        label = "PASS" if r["status"] == "PASS" else "FAIL"
-        name = f"{r['rel_path'].with_suffix('')}::{r['func_name']}"
-        lines.append(f"  {label:<6}{r['duration']:.3f}s  {name}")
-
-    lines += [
-        dash,
-        _row("Tests", str(len(results))),
-        _row("Passed", str(passed)),
-        _row("Failed", str(failed)),
-        sep,
-    ]
-
-    summary_path = run_dir / "summary.txt"
-    summary_path.write_text("\n".join(lines) + "\n")
-
-
-def run(
-    test_path: str, endpoint: str, results_path: str = "results", tests_root: str = ""
-) -> int:
-    """Discover and run all @ammtest tests. Returns 0 if all pass, 1 if any fail."""
-    results_path = Path(results_path)
-
-    now = datetime.now()
-    ctx = {
-        "date": now.strftime("%Y-%m-%d"),
-        "time": now.strftime("%H:%M:%S"),
-        "user": os.environ.get("USERNAME") or os.environ.get("USER") or "unknown",
-        "host": socket.gethostname(),
-    }
-
-    run_dir = results_path / now.strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(_ColorFormatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
-    root.addHandler(stream_handler)
-
-    base = Path(test_path).resolve()
-    if tests_root:
-        tests_root = Path(tests_root).resolve()
-    else:
-        tests_root = base.parent if base.is_file() else base
-    tests = _discover(base, tests_root)
-
-    if not tests:
-        print(f"No tests found in {test_path}")
-        return 0
-
-    client = AmmioClient(endpoint)
-
-    results = []
+def _context(endpoint: str) -> dict:
     try:
-        for rel_path, func in tests:
-            results.append(_run_one(client, rel_path, func, run_dir, ctx))
-    finally:
-        client.close()
+        user = getpass.getuser()
+    except Exception:
+        user = "unknown"
+    return {
+        "ammtest": __version__,
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "user": user,
+        "host": socket.gethostname(),
+        "endpoint": endpoint,
+    }
 
-    passed = sum(1 for r in results if r["status"] == "PASS")
-    failed = len(results) - passed
-    _write_summary(run_dir, results, ctx, passed, failed)
 
-    root.removeHandler(stream_handler)
-    color = _C.GREEN if failed == 0 else _C.RED
-    print(f"\n{_C.DIM}{'=' * 60}{_C.RESET}")
-    print(
-        f"{len(results)} tests: {color}{_C.BOLD}{passed} passed, {failed} failed{_C.RESET}"
-    )
-    print(f"{_C.DIM}Results: {run_dir}{_C.RESET}")
-    return 0  # by now always return 0 even if there are fails
+_PKG_DIR = Path(__file__).resolve().parent
+
+
+def _format_exception(e: BaseException) -> str:
+    """Traceback showing only user code: ammtest's own frames are dropped."""
+    top = traceback.TracebackException.from_exception(e)
+    te, seen = top, set()
+    while te is not None and id(te) not in seen:  # also the chained causes
+        seen.add(id(te))
+        frames = [f for f in te.stack if Path(f.filename).resolve().parent != _PKG_DIR]
+        te.stack = traceback.StackSummary.from_list(frames)
+        te = te.__cause__ or te.__context__
+    return "".join(top.format()).rstrip()
+
+
+def _run_one(case: Case, client: AmmioClient, run_dir: Path, ctx: dict, color: bool) -> _Outcome:
+    rel_report = case.rel.parent / f"{case.rel.stem}.{case.func.__name__}.txt"
+    report = run_dir / rel_report
+    report.parent.mkdir(parents=True, exist_ok=True)
+    started = datetime.now()
+
+    with report.open("w", encoding="utf-8") as f:
+        out = _Out(f, color)
+        sep, dash = "=" * _W, "-" * _W
+        out.line(sep, "dim")
+        out.line(f"{'AMMTEST EXECUTION REPORT':^{_W}}".rstrip(), "bold")
+        out.line(sep, "dim")
+        out.line(_kv("Test", case.id))
+        out.line(_kv("Description", case.meta.description or "(none)"))
+        out.line(_kv("Version", case.meta.version or "(none)"))
+        for line in _req_lines(case.meta.requirements):
+            out.line(line)
+        out.line(_kv("File SHA-256", case.sha256))
+        out.line(dash, "dim")
+        out.line(_kv("Started", started.strftime("%Y-%m-%d %H:%M:%S")))
+        out.line(_kv("Executed by", ctx["user"]))
+        out.line(_kv("Host", ctx["host"]))
+        out.line(_kv("Endpoint", ctx["endpoint"]))
+        out.line(_kv("Tool", f"ammtest {ctx['ammtest']}, Python {ctx['python']}, {ctx['platform']}"))
+        out.line(sep, "dim")
+        out.line()
+        out.line("--- LOG ---", "bold")
+        out.line()
+
+        t0 = time.monotonic()
+
+        def log(text: str, style: str = "") -> None:
+            stamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            elapsed = f"+{time.monotonic() - t0:.3f}s"
+            out.line(f"{stamp} {elapsed:>10}  {text}", style)
+
+        sut = Sut(client, log)
+        status, error, abort = "PASS", None, None
+        try:
+            case.func(sut)
+        except AssertionError as e:
+            status, error = "FAIL", _format_exception(e)
+        except AmmioConnectionError as e:
+            status, error, abort = "ERROR", _format_exception(e), f"connection to ammio lost: {e}"
+        except KeyboardInterrupt:
+            status, error, abort = "ERROR", "interrupted by user", "interrupted by user"
+        except Exception as e:
+            status, error = "ERROR", _format_exception(e)
+        duration = time.monotonic() - t0
+        if status == "PASS" and sut.failures:
+            status = "FAIL"
+
+        out.line()
+        out.line(sep, "dim")
+        out.line("--- RESULT ---", "bold")
+        out.line(_kv("Status", status), status)
+        out.line(_kv("Duration", f"{duration:.3f}s"))
+        out.line(_kv("Checks", f"{sut.passed} passed, {len(sut.failures)} failed"))
+        _write_failures(out, sut.failures)
+        if error:
+            out.line()
+            out.line("--- EXCEPTION ---", "fail")
+            for line in error.splitlines():
+                out.line(line, "fail")
+        out.line(sep, "dim")
+        out.line()
+
+    return _Outcome(case, status, started, duration, sut.passed, len(sut.failures), rel_report, abort)
+
+
+def _write_failures(out: _Out, failures: list[Failure]) -> None:
+    if not failures:
+        return
+    out.line()
+    out.line("--- CHECK FAILURES ---", "fail")
+    for i, fail in enumerate(failures, 1):
+        out.line(f"  [{i}] {fail.message}", "fail")
+        out.line(f"      {fail.file}:{fail.line}  {fail.source}", "fail")
+
+
+def _new_run_dir(results: Path, now: datetime) -> Path:
+    base = results / now.strftime("%Y-%m-%d_%H-%M-%S")
+    candidate, n = base, 1
+    while True:
+        try:
+            candidate.mkdir(parents=True)
+            return candidate
+        except FileExistsError:
+            n += 1
+            candidate = base.with_name(f"{base.name}_{n}")
+
+
+def run(path: str | Path, endpoint: str, results: str | Path = "results") -> int:
+    """Discover and run every test under `path`. Returns the process exit code."""
+    cases = discover(path)
+    if not cases:
+        raise CollectionError(f"no @ammtest tests found in {path}")
+
+    ctx = _context(endpoint)
+    color = _use_color()
+    started = datetime.now()
+    outcomes: list[_Outcome] = []
+    aborted = None
+
+    with AmmioClient(endpoint) as client:
+        run_dir = _new_run_dir(Path(results), started)
+        for case in cases:
+            outcome = _run_one(case, client, run_dir, ctx, color)
+            outcomes.append(outcome)
+            if outcome.abort:
+                aborted = outcome.abort
+                break
+
+    not_run = [c.id for c in cases[len(outcomes):]]
+    _write_summary(run_dir, ctx, started, datetime.now(), outcomes, not_run, aborted)
+    _print_summary(_Out(color=color), run_dir, outcomes, not_run, aborted)
+
+    if aborted:
+        return EXIT_ERROR
+    return EXIT_PASS if all(o.status == "PASS" for o in outcomes) else EXIT_FAIL
+
+
+# --- summary -----------------------------------------------------------------
+
+
+def _totals(outcomes: list[_Outcome], not_run: list[str]) -> dict:
+    count = lambda s: sum(o.status == s for o in outcomes)  # noqa: E731
+    return {
+        "tests": len(outcomes) + len(not_run),
+        "passed": count("PASS"),
+        "failed": count("FAIL"),
+        "errors": count("ERROR"),
+        "not_run": len(not_run),
+    }
+
+
+def _write_summary(run_dir, ctx, started, finished, outcomes, not_run, aborted) -> None:
+    totals = _totals(outcomes, not_run)
+    overall = "ERROR" if aborted else ("PASS" if totals["passed"] == totals["tests"] else "FAIL")
+
+    data = {
+        **ctx,
+        "started": started.isoformat(timespec="seconds"),
+        "finished": finished.isoformat(timespec="seconds"),
+        "status": overall,
+        "aborted": aborted,
+        "totals": totals,
+        "tests": [
+            {
+                "id": o.case.id,
+                "status": o.status,
+                "version": o.case.meta.version,
+                "description": o.case.meta.description,
+                "requirements": o.case.meta.requirements,
+                "file_sha256": o.case.sha256,
+                "started": o.started.isoformat(timespec="milliseconds"),
+                "duration_s": round(o.duration, 3),
+                "checks_passed": o.checks_passed,
+                "checks_failed": o.checks_failed,
+                "report": o.report.as_posix(),
+            }
+            for o in outcomes
+        ],
+        "not_run": not_run,
+    }
+    (run_dir / "results.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    sep, dash = "=" * _W, "-" * _W
+    lines = [
+        sep,
+        f"{'AMMTEST RUN SUMMARY':^{_W}}".rstrip(),
+        sep,
+        _kv("Started", data["started"].replace("T", " ")),
+        _kv("Finished", data["finished"].replace("T", " ")),
+        _kv("Executed by", ctx["user"]),
+        _kv("Host", ctx["host"]),
+        _kv("Endpoint", ctx["endpoint"]),
+        _kv("Tool", f"ammtest {ctx['ammtest']}, Python {ctx['python']}, {ctx['platform']}"),
+        dash,
+    ]
+    lines += [f"  {o.status:<7}{o.duration:8.3f}s  {o.case.id}" for o in outcomes]
+    lines += [f"  {'NOT RUN':<7}{'':>9}  {case_id}" for case_id in not_run]
+    lines += [dash, _kv("Status", overall)]
+    lines += [_kv(k.replace("_", " ").capitalize(), v) for k, v in totals.items()]
+    if aborted:
+        lines.append(_kv("Aborted", aborted))
+    lines.append(sep)
+    (run_dir / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _print_summary(out: _Out, run_dir, outcomes, not_run, aborted) -> None:
+    out.line("=" * 60, "dim")
+    for o in outcomes:
+        out.line(f"{o.status:<7}{o.duration:8.3f}s  {o.case.id}", o.status)
+    for case_id in not_run:
+        out.line(f"{'NOT RUN':<7}{'':>9}  {case_id}", "dim")
+    out.line("-" * 60, "dim")
+    t = _totals(outcomes, not_run)
+    text = f"{t['tests']} tests: {t['passed']} passed, {t['failed']} failed, {t['errors']} errors"
+    if t["not_run"]:
+        text += f", {t['not_run']} not run"
+    out.line(text, "PASS" if t["passed"] == t["tests"] else "FAIL")
+    if aborted:
+        out.line(f"Run aborted: {aborted}", "ERROR")
+    out.line(f"Results: {run_dir}", "dim")

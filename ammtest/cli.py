@@ -1,321 +1,153 @@
-"""
-ammtest CLI - Test runner for safety-critical systems.
+"""ammtest command line: run, vars, trace."""
 
-Usage:
-    ammtest run <path> --endpoint=<url>                     Run all tests
-    ammtest run <path> --endpoint=<url> --results=<path>    With custom results folder
-    ammtest run <path> --endpoint=<url> --tests-root=<path> With explicit tests root
-    ammtest vars --endpoint=<url>                           List all variables in ammio
-    ammtest vars --endpoint=<url> --output=<path>           Write variable list to file
-    ammtest trace-tests <path>                              List test cases and their requirements
-    ammtest trace-tests <path> --output=<path>              Write trace to file
-    ammtest trace-reqs <path> --reqs=<csv> --col=<n>            List requirements and their test coverage
-    ammtest trace-reqs <path> --reqs=<csv> --col=<n> --skip-header --output=<path>
-"""
-
+import argparse
+import csv
+import os
 import sys
 
+from . import __version__
+from .client import AmmioClient, AmmioError
+from .runner import EXIT_ERROR, EXIT_FAIL, EXIT_PASS, Case, CollectionError, discover, run
 
-def main():
-    if len(sys.argv) < 2:
-        print_usage()
-        sys.exit(1)
-
-    command = sys.argv[1]
-
-    if command == "run":
-        run_tests(sys.argv[2:])
-    elif command == "vars":
-        list_vars(sys.argv[2:])
-    elif command == "trace-tests":
-        trace_tests(sys.argv[2:])
-    elif command == "trace-reqs":
-        trace_reqs(sys.argv[2:])
-    elif command in ("--help", "-h"):
-        print_usage()
-    else:
-        print(f"Unknown command: {command}")
-        print_usage()
-        sys.exit(1)
+DEFAULT_ENDPOINT = "tcp://127.0.0.1:5555"
 
 
-def print_usage():
-    print(
-        "ammtest - Python test framework for critical-software systems. Write, run, and trace system-level tests against any System Under Test (SUT)."
-    )
-    print()
-    print("Usage:")
-    print("  ammtest run <path> --endpoint=<url> [options]")
-    print("  ammtest vars --endpoint=<url> [options]")
-    print("  ammtest trace-tests <path> [options]")
-    print()
-    print("Options (run):")
-    print("  --endpoint=<url>      ammio endpoint (e.g. tcp://127.0.0.1:5555)")
-    print("  --results=<path>      Results folder (default: results)")
-    print("  --tests-root=<path>   Tests root for relative paths (default: <path>)")
-    print()
-    print("Options (vars):")
-    print("  --endpoint=<url>      ammio endpoint")
-    print("  --output=<path>       Write variable list to file")
-    print()
-    print("Options (trace-tests):")
-    print("  --output=<path>       Write trace to file")
-    print()
-    print("Examples:")
-    print("  ammtest run tests/ --endpoint=tcp://127.0.0.1:5555")
-    print("  ammtest run tests/ --endpoint=tcp://127.0.0.1:5555 --results=out/")
-    print("  ammtest vars --endpoint=tcp://127.0.0.1:5555")
-    print("  ammtest vars --endpoint=tcp://127.0.0.1:5555 --output=vars.txt")
-    print("  ammtest trace-tests tests/")
-    print("  ammtest trace-tests tests/ --output=trace.txt")
-    print("  ammtest trace-reqs tests/ --reqs=requirements.csv --col=1 --skip-header")
-    print("  ammtest trace-reqs tests/ --reqs=requirements.csv --col=1 --skip-header --output=coverage.txt")
+def _table(headers: list[str], rows: list[list[str]]) -> str:
+    widths = [max(len(str(x)) for x in col) for col in zip(headers, *rows)]
+    fmt = lambda row: "  " + "  ".join(f"{str(x):<{w}}" for x, w in zip(row, widths)).rstrip()  # noqa: E731
+    return "\n".join([fmt(headers), fmt(["-" * w for w in widths])] + [fmt(r) for r in rows])
 
 
-def run_tests(args):
-    if not args:
-        print("Error: No test path specified")
-        print("Usage: ammtest run <path> --endpoint=<url>")
-        sys.exit(1)
-
-    test_path = args[0]
-    endpoint = None
-    results = "results"
-    tests_root = ""
-
-    for arg in args[1:]:
-        if arg.startswith("--endpoint="):
-            endpoint = arg.split("=", 1)[1]
-        elif arg.startswith("--results="):
-            results = arg.split("=", 1)[1]
-        elif arg.startswith("--tests-root="):
-            tests_root = arg.split("=", 1)[1]
-
-    if not endpoint:
-        print("Error: --endpoint is required")
-        print("Usage: ammtest run <path> --endpoint=<url>")
-        sys.exit(1)
-
-    from .runner import run
-
-    sys.exit(run(test_path, endpoint, results, tests_root))
+def _cmd_run(args) -> int:
+    return run(args.path, args.endpoint, args.results)
 
 
-def list_vars(args):
-    endpoint = None
-    output_path = None
+def _cmd_vars(args) -> int:
+    with AmmioClient(args.endpoint) as client:
+        variables = client.list_vars()
+    if not variables:
+        print(f"No variables in ammio at {args.endpoint}. Is ammio fully initialized?")
+        return EXIT_ERROR
+    rows = [[v.get("var_id", ""), v.get("type", ""), v.get("dir", "")] for v in variables]
+    print(_table(["Variable", "Type", "Dir"], rows))
+    print(f"\n  {len(rows)} variable(s)")
+    return EXIT_PASS
 
-    for arg in args:
-        if arg.startswith("--endpoint="):
-            endpoint = arg.split("=", 1)[1]
-        elif arg.startswith("--output="):
-            output_path = arg.split("=", 1)[1]
 
-    if not endpoint:
-        print("Error: --endpoint is required")
-        print("Usage: ammtest vars --endpoint=<url>")
-        sys.exit(1)
-
-    from .ammio import AmmioClient
-
-    client = AmmioClient(endpoint)
+def _read_requirements(path: str, col: int, delimiter: str, skip_header: bool) -> list[str]:
     try:
-        vars_list = client.list_vars()
-    finally:
-        client.close()
-
-    if not vars_list:
-        print(f"No variables in ammio var_table at {endpoint}.")
-        print("Is ammio running and fully initialized?")
-        return
-
-    col_id   = max(max(len(v["var_id"]) for v in vars_list), len("Variable"))
-    col_type = max(max(len(str(v.get("type", ""))) for v in vars_list), len("Type"))
-    col_dir  = max(max(len(str(v.get("dir",  ""))) for v in vars_list), len("Dir"))
-
-    lines = [
-        f"  {'Variable':<{col_id}}  {'Type':<{col_type}}  Dir",
-        f"  {'-' * col_id}  {'-' * col_type}  {'-' * col_dir}",
-    ]
-    for v in vars_list:
-        lines.append(f"  {v['var_id']:<{col_id}}  {str(v.get('type', '')):<{col_type}}  {v.get('dir', '')}")
-    lines.append("")
-    lines.append(f"  {len(vars_list)} variable(s)")
-
-    output = "\n".join(lines)
-    print(output)
-
-    if output_path:
-        with open(output_path, "w") as f:
-            f.write(output + "\n")
-        print(f"\n  Written to {output_path}")
-
-
-def trace_tests(args):
-    if not args:
-        print("Error: No test path specified")
-        print("Usage: ammtest trace-tests <path>")
-        sys.exit(1)
-
-    test_path = args[0]
-    output_path = None
-
-    for arg in args[1:]:
-        if arg.startswith("--output="):
-            output_path = arg.split("=", 1)[1]
-
-    from pathlib import Path
-    from .runner import _discover
-
-    base = Path(test_path).resolve()
-    tests = _discover(base, base if base.is_dir() else base.parent)
-
-    if not tests:
-        print(f"No tests found in {test_path}")
-        return
-
-    col_test = max(
-        max(len(f"{p.stem}::{fn.__name__}") for p, fn in tests),
-        len("Test"),
-    )
-
-    lines = [
-        f"  {'Test':<{col_test}}  Requirements",
-        f"  {'-' * col_test}  {'-' * 40}",
-    ]
-    no_reqs = []
-    for rel_path, func in tests:
-        name = f"{rel_path.stem}::{func.__name__}"
-        reqs = func._ammtest_meta.get("requirements", [])
-        if reqs:
-            req_str = ", ".join(r['req'] for r in reqs)
-        else:
-            req_str = "(none)"
-            no_reqs.append(name)
-        lines.append(f"  {name:<{col_test}}  {req_str}")
-
-    lines.append("")
-    lines.append(f"  {len(tests)} test(s)  |  {len(no_reqs)} without requirements")
-    if no_reqs:
-        lines.append("")
-        lines.append("  Tests with no requirements:")
-        for name in no_reqs:
-            lines.append(f"    {name}")
-
-    output = "\n".join(lines)
-    print(output)
-
-    if output_path:
-        with open(output_path, "w") as f:
-            f.write(output + "\n")
-        print(f"\n  Written to {output_path}")
-
-
-def trace_reqs(args):
-    if not args:
-        print("Error: No test path specified")
-        print("Usage: ammtest trace-reqs <path> --reqs=<csv> --col=<column>")
-        sys.exit(1)
-
-    test_path = args[0]
-    reqs_path = None
-    col = None
-    skip_header = False
-    delimiter = ","
-    output_path = None
-
-    for arg in args[1:]:
-        if arg.startswith("--reqs="):
-            reqs_path = arg.split("=", 1)[1]
-        elif arg.startswith("--col="):
-            col = arg.split("=", 1)[1]
-        elif arg == "--skip-header":
-            skip_header = True
-        elif arg.startswith("--delimiter="):
-            delimiter = arg.split("=", 1)[1]
-        elif arg.startswith("--output="):
-            output_path = arg.split("=", 1)[1]
-
-    if not reqs_path:
-        print("Error: --reqs is required")
-        sys.exit(1)
-    if col is None:
-        print("Error: --col is required (1-based column number)")
-        sys.exit(1)
-
-    try:
-        col_idx = int(col) - 1  # convert 1-based to 0-based
-        if col_idx < 0:
-            raise ValueError
-    except ValueError:
-        print(f"Error: --col must be a positive integer, got '{col}'")
-        sys.exit(1)
-
-    import csv
-    from pathlib import Path
-    from .runner import _discover
-
-    if len(delimiter) != 1:
-        print(f"Error: --delimiter must be a single character (e.g. --delimiter=\";\")")
-        sys.exit(1)
-
-    try:
-        with open(reqs_path, newline="") as f:
+        with open(path, newline="", encoding="utf-8-sig") as f:
             rows = list(csv.reader(f, delimiter=delimiter))
     except FileNotFoundError:
-        print(f"Error: Requirements file not found: {reqs_path}")
-        sys.exit(1)
-
+        raise CollectionError(f"requirements file not found: {path}") from None
     if skip_header:
         rows = rows[1:]
+    ids = (row[col - 1].strip() for row in rows if len(row) >= col)
+    return list(dict.fromkeys(i for i in ids if i))  # unique, file order
 
-    req_ids = [
-        row[col_idx] for row in rows
-        if len(row) > col_idx and row[col_idx].strip()
+
+def _cmd_trace(args) -> int:
+    cases = discover(args.path)
+    if not cases:
+        raise CollectionError(f"no @ammtest tests found in {args.path}")
+    if args.reqs is None:
+        return _trace_tests(cases)
+    if args.col < 1:
+        raise CollectionError(f"--col is 1-based, got {args.col}")
+    if len(args.delimiter) != 1:
+        raise CollectionError(f"--delimiter must be one character, got {args.delimiter!r}")
+    reqs = _read_requirements(args.reqs, args.col, args.delimiter, args.skip_header)
+    if not reqs:
+        raise CollectionError(f"no requirement ids in column {args.col} of {args.reqs}")
+    return _trace_reqs(cases, reqs)
+
+
+def _trace_tests(cases: list[Case]) -> int:
+    rows = [
+        [c.id, ", ".join(f"{r} [{b or '-'}]" for r, b in c.meta.requirements.items()) or "(none)"]
+        for c in cases
     ]
+    print(_table(["Test", "Requirements"], rows))
+    untraced = [c.id for c in cases if not c.meta.requirements]
+    print(f"\n  {len(cases)} test(s), {len(untraced)} without requirements")
+    for case_id in untraced:
+        print(f"    {case_id}")
+    return EXIT_FAIL if untraced else EXIT_PASS
 
-    if not req_ids:
-        print("No requirements found. Check --col and --skip-header.")
-        return
 
-    # Build req_id -> [test names] map from test metadata
-    base = Path(test_path).resolve()
-    tests = _discover(base, base if base.is_dir() else base.parent)
+def _trace_reqs(cases: list[Case], reqs: list[str]) -> int:
+    coverage: dict[str, list[str]] = {}
+    for c in cases:
+        for req, baseline in c.meta.requirements.items():
+            coverage.setdefault(req, []).append(f"{c.id} [{baseline or '-'}]")
+    rows = [[req, ", ".join(coverage.get(req, [])) or "(not covered)"] for req in reqs]
+    print(_table(["Requirement", "Tests"], rows))
 
-    coverage = {}  # req_id -> list of test names
-    for rel_path, func in tests:
-        name = f"{rel_path.stem}::{func.__name__}"
-        for r in func._ammtest_meta.get("requirements", []):
-            req_id = r["req"]
-            coverage.setdefault(req_id, []).append(name)
+    uncovered = [r for r in reqs if r not in coverage]
+    known = set(reqs)
+    unknown = [r for r in coverage if r not in known]
+    print(f"\n  {len(reqs)} requirement(s), {len(uncovered)} not covered")
+    for req in uncovered:
+        print(f"    {req}")
+    if unknown:
+        print(f"\n  {len(unknown)} requirement(s) referenced by tests but not in the requirements file")
+        for req in unknown:
+            print(f"    {req}  <- {', '.join(coverage[req])}")
+    return EXIT_FAIL if uncovered or unknown else EXIT_PASS
 
-    col_req = max(max(len(r) for r in req_ids), len("Requirement"))
-    not_covered = [r for r in req_ids if r not in coverage]
 
-    lines = [
-        f"  {'Requirement':<{col_req}}  Tests",
-        f"  {'-' * col_req}  {'-' * 40}",
-    ]
-    for req_id in req_ids:
-        tests_str = ", ".join(coverage[req_id]) if req_id in coverage else "(not covered)"
-        lines.append(f"  {req_id:<{col_req}}  {tests_str}")
+def _parser() -> argparse.ArgumentParser:
+    default_endpoint = os.environ.get("AMMTEST_ENDPOINT", DEFAULT_ENDPOINT)
+    endpoint_help = f"ammio endpoint (default: $AMMTEST_ENDPOINT, else {DEFAULT_ENDPOINT})"
 
-    lines.append("")
-    lines.append(f"  {len(req_ids)} requirement(s)  |  {len(not_covered)} not covered")
-    if not_covered:
-        lines.append("")
-        lines.append("  Requirements with no test coverage:")
-        for req_id in not_covered:
-            lines.append(f"    {req_id}")
+    p = argparse.ArgumentParser(
+        prog="ammtest",
+        allow_abbrev=False,
+        description="Write, run and trace system-level tests against any SUT through ammio.",
+        epilog="exit codes: 0 pass, 1 test failed / trace gap, 2 could not run",
+    )
+    p.add_argument("--version", action="version", version=f"ammtest {__version__}")
+    sub = p.add_subparsers(dest="command", required=True, metavar="command")
 
-    output = "\n".join(lines)
-    print(output)
+    r = sub.add_parser("run", allow_abbrev=False, help="run tests and write evidence reports")
+    r.add_argument("path", help="test file or folder")
+    r.add_argument("-e", "--endpoint", default=default_endpoint, help=endpoint_help)
+    r.add_argument("-r", "--results", default="results", help="results folder (default: results)")
+    r.set_defaults(func=_cmd_run)
 
-    if output_path:
-        with open(output_path, "w") as f:
-            f.write(output + "\n")
-        print(f"\n  Written to {output_path}")
+    v = sub.add_parser("vars", allow_abbrev=False, help="list the variables ammio exposes")
+    v.add_argument("-e", "--endpoint", default=default_endpoint, help=endpoint_help)
+    v.set_defaults(func=_cmd_vars)
+
+    t = sub.add_parser(
+        "trace",
+        allow_abbrev=False,
+        help="traceability: tests -> requirements, or requirements -> tests with --reqs",
+        description="Without --reqs: list each test and its requirements (fails if a test has none). "
+        "With --reqs: list each requirement of the CSV and the tests covering it "
+        "(fails if one is not covered or a test references an id missing from the CSV). "
+        "Does not connect to ammio.",
+    )
+    t.add_argument("path", help="test file or folder")
+    t.add_argument("--reqs", metavar="CSV", help="requirements file (CSV or one id per line)")
+    t.add_argument("--col", type=int, default=1, help="1-based column holding the ids (default: 1)")
+    t.add_argument("--delimiter", default=",", help="CSV delimiter (default: ,)")
+    t.add_argument("--skip-header", action="store_true", help="ignore the first row")
+    t.set_defaults(func=_cmd_trace)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+    args = _parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except (CollectionError, AmmioError) as e:
+        print(f"ammtest: error: {e}", file=sys.stderr)
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,24 +1,44 @@
-def ammtest(version="", description="", requirements=None):
-    """
-    Marks a function as an ammtest test case.
+"""The @ammtest decorator: marks a function as a test and attaches its trace data."""
 
-    Args:
-        version: Test version string
-        description: What this test verifies
-        requirements: List of dicts, each with 'req' and 'baseline' keys
-                      e.g. [{"req": "RS-001", "baseline": "A"}]
+from dataclasses import dataclass
+
+META_ATTR = "__ammtest__"
+
+
+@dataclass(frozen=True)
+class Metadata:
+    version: str
+    description: str
+    requirements: dict[str, str]  # requirement id -> baseline
+
+
+def ammtest(*, version: str = "", description: str = "", requirements: dict[str, str] | None = None):
+    """Mark a function as an ammtest test case.
+
+    @ammtest(
+        version="1.0",
+        description="Brake engages on request",
+        requirements={"REQ-1416": "A", "REQ-1418": "B"},  # id -> baseline
+    )
+    def test_brake(sut): ...
     """
+    if not isinstance(version, str) or not isinstance(description, str):
+        raise TypeError("@ammtest: version and description must be strings")
+    reqs = {} if requirements is None else requirements
+    if not isinstance(reqs, dict):
+        raise TypeError(
+            "@ammtest: requirements must be a dict {requirement_id: baseline}, "
+            f"e.g. {{'REQ-1416': 'A'}}; got {type(reqs).__name__}"
+        )
+    for req, baseline in reqs.items():
+        if not isinstance(req, str) or not req.strip() or not isinstance(baseline, str):
+            raise TypeError(
+                f"@ammtest: requirement ids and baselines must be strings, got {req!r}: {baseline!r}"
+            )
+    meta = Metadata(version, description, dict(reqs))
+
     def decorator(func):
-        reqs = requirements or []
-        for r in reqs:
-            if not isinstance(r, dict) or "req" not in r or "baseline" not in r:
-                raise ValueError(
-                    f"@ammtest: each requirement must be a dict with 'req' and 'baseline' keys, got: {r!r}"
-                )
-        func._ammtest_meta = {
-            "version": version,
-            "description": description,
-            "requirements": reqs,
-        }
+        setattr(func, META_ATTR, meta)
         return func
+
     return decorator

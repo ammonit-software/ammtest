@@ -1,12 +1,26 @@
-from .ammio import AmmioClient
-from .decorator import ammtest
-from .exceptions import AmmioConnectionError, AmmioError
-from .th import AmmTestHelper
+"""ammtest: minimal, traceable system-test framework for critical software."""
+
+__version__ = "0.2.0"
+
+from .client import AmmioClient, AmmioConnectionError, AmmioError  # noqa: E402
+from .conditions import Condition, approx, between, eq, ge, gt, le, lt, ne  # noqa: E402
+from .decorator import ammtest  # noqa: E402
+from .sut import Sut  # noqa: E402
 
 __all__ = [
+    "__version__",
     "ammtest",
+    "Sut",
+    "Condition",
+    "eq",
+    "ne",
+    "lt",
+    "le",
+    "gt",
+    "ge",
+    "between",
+    "approx",
     "AmmioClient",
-    "AmmTestHelper",
     "AmmioError",
     "AmmioConnectionError",
 ]
