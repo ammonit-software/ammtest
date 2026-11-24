@@ -26,7 +26,7 @@ from pathlib import Path
 from . import __version__
 from .client import AmmioClient, AmmioConnectionError, AmmioError
 from .decorator import META_ATTR, Metadata
-from .sut import Failure, Sut
+from .sut import DEFAULT_MAX_AGE, Failure, Sut
 
 EXIT_PASS, EXIT_FAIL, EXIT_ERROR = 0, 1, 2
 SAFE_STATE_FILE = "_safe_state.py"
@@ -78,8 +78,9 @@ def discover(path: str | Path) -> list[Case]:
         files = [root_path]
     else:
         files = sorted(
-            f for f in root_path.rglob("*.py")
-            if not any(part.startswith((".", "_")) for part in f.relative_to(root).parts)
+            (f for f in root_path.rglob("*.py")
+             if not any(part.startswith((".", "_")) for part in f.relative_to(root).parts)),
+            key=lambda f: f.relative_to(root).parts,  # same order on every OS (Windows paths sort caseless)
         )
     safe_states: dict[Path, SafeState | None] = {}
     cases = []
@@ -149,7 +150,7 @@ def _find_safe_state(folder: Path, cache: dict) -> SafeState | None:
 # --- environment ---------------------------------------------------------------
 
 
-def _context(endpoint: str) -> dict:
+def _context(endpoint: str, max_age: float) -> dict:
     try:
         user = getpass.getuser()
     except Exception:
@@ -161,6 +162,7 @@ def _context(endpoint: str) -> dict:
         "user": user,
         "host": socket.gethostname(),
         "endpoint": endpoint,
+        "max_value_age_s": max_age,
     }
 
 
@@ -280,8 +282,13 @@ def _ctx_lines(ctx: dict, started: datetime) -> list[str]:
         _kv("Executed by", ctx["user"]),
         _kv("Host", ctx["host"]),
         _kv("Endpoint", ctx["endpoint"]),
+        _kv("Max value age", _max_age_text(ctx["max_value_age_s"])),
         _kv("Tool", f"ammtest {ctx['ammtest']}, Python {ctx['python']}, {ctx['platform']}"),
     ]
+
+
+def _max_age_text(max_age: float) -> str:
+    return f"{max_age}s (older SUT outputs are an ERROR)" if max_age else "not checked"
 
 
 def _format_exception(e: BaseException) -> str:
@@ -318,10 +325,10 @@ class _Outcome:
     abort_kind: str | None = None  # "connection" | "safe_state" | "interrupt"
 
 
-def _apply_safe_state(safe_state: SafeState, client: AmmioClient, log: _Logger) -> str | None:
+def _apply_safe_state(safe_state: SafeState, client: AmmioClient, log: _Logger, max_age: float) -> str | None:
     """Run safe_state(sut). Returns None on success, else what went wrong."""
     log.restart()
-    sut = Sut(client, log)
+    sut = Sut(client, log, max_age)
     try:
         safe_state.func(sut)
     except KeyboardInterrupt:
@@ -365,13 +372,13 @@ def _run_one(case: Case, client: AmmioClient, run_dir: Path, ctx: dict, git: dic
         out.line(sep, "dim")
 
         log = _Logger(out)
-        sut = Sut(client, log)
+        sut = Sut(client, log, ctx["max_value_age_s"])
         status, error, abort, abort_kind = "PASS", None, None, None
         duration = 0.0
 
         if case.safe_state:
             out.section("SAFE STATE")
-            problem = _apply_safe_state(case.safe_state, client, log)
+            problem = _apply_safe_state(case.safe_state, client, log, ctx["max_value_age_s"])
             if problem:
                 status, error = "ERROR", f"safe state failed, test not run:\n{problem}"
                 abort, abort_kind = f"safe state failed before {case.id}: {_last_line(problem)}", "safe_state"
@@ -380,9 +387,10 @@ def _run_one(case: Case, client: AmmioClient, run_dir: Path, ctx: dict, git: dic
             try:
                 out.section("INITIAL STATE")
                 snapshot = sut._snapshot()
-                widths = [max(len(str(row[i])) for row in snapshot) for i in range(3)] if snapshot else [0] * 3
-                for var_id, vtype, vdir, value in snapshot:
-                    out.line(f"  {var_id:<{widths[0]}}  {vtype:<{widths[1]}}  {vdir:<{widths[2]}}  {value!r}")
+                widths = [max(len(row[i]) for row in snapshot) for i in range(4)] if snapshot else [0] * 4
+                for row in snapshot:
+                    cells = "  ".join(f"{cell:<{w}}" for cell, w in zip(row, widths + [0]))
+                    out.line(f"  {cells}".rstrip(), "warn" if row[4].startswith(("STALE", "NEVER")) else "")
                 out.section("LOG")
                 log.restart()
                 t0 = time.monotonic()
@@ -454,7 +462,7 @@ def _final_safe_state(safe_state: SafeState, client: AmmioClient, run_dir: Path,
             out.line(line)
         out.line(sep, "dim")
         out.section("LOG")
-        problem = _apply_safe_state(safe_state, client, _Logger(out))
+        problem = _apply_safe_state(safe_state, client, _Logger(out), ctx["max_value_age_s"])
         result = "applied" if problem is None else f"FAILED: {_last_line(problem)}"
         out.section("RESULT")
         out.line(_kv("Status", "APPLIED" if problem is None else "FAILED"), "PASS" if problem is None else "ERROR")
@@ -479,13 +487,16 @@ def _new_run_dir(results: Path, now: datetime) -> Path:
             candidate = base.with_name(f"{base.name}_{n}")
 
 
-def run(path: str | Path, endpoint: str, results: str | Path = "results", verbose: bool = False) -> int:
+def run(path: str | Path, endpoint: str, results: str | Path = "results", verbose: bool = False,
+        max_age: float = DEFAULT_MAX_AGE) -> int:
     """Discover and run every test under `path`. Returns the process exit code."""
     cases = discover(path)
     if not cases:
         raise CollectionError(f"no @ammtest tests found in {path}")
 
-    ctx = _context(endpoint)
+    if not isinstance(max_age, (int, float)) or max_age < 0:
+        raise CollectionError(f"max age must be a number of seconds >= 0, got {max_age!r}")
+    ctx = _context(endpoint, max_age)
     term = _Term(sys.stdout.isatty() and "NO_COLOR" not in os.environ)
     files = {c.path for c in cases} | {c.safe_state.path for c in cases if c.safe_state}
     git = {f: git_state(f) for f in files}
@@ -585,6 +596,7 @@ def _write_summary(run_dir: Path, s: dict) -> None:
         _kv("Executed by", s["user"]),
         _kv("Host", s["host"]),
         _kv("Endpoint", s["endpoint"]),
+        _kv("Max value age", _max_age_text(s["max_value_age_s"])),
         _kv("Tool", f"ammtest {s['ammtest']}, Python {s['python']}, {s['platform']}"),
         _kv("Git", ", ".join(commits) or "(not under git)"),
         dash,

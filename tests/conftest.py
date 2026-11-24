@@ -36,6 +36,7 @@ class FakeAmmio:
         self.endpoint = f"inproc://ammtest-{uuid.uuid4().hex}"
         self.values: dict = {}
         self.meta: dict = {}  # var_id -> (type, dir); default ("float64", "input")
+        self.stamps: dict = {}  # var_id -> pinned timestamp (ns); otherwise always fresh, like a live bus
         self.requests: list[dict] = []
         self._timers: list[threading.Timer] = []
         self._socket = pynng.Rep0(listen=self.endpoint, recv_timeout=50)
@@ -50,6 +51,10 @@ class FakeAmmio:
     def set(self, var_id, value):
         """SUT side: set any variable, regardless of direction."""
         self.values[var_id] = value
+
+    def freeze(self, var_id, age_s):
+        """Simulate the SUT going silent: the last update of `var_id` was `age_s` seconds ago."""
+        self.stamps[var_id] = time.time_ns() - int(age_s * 1e9)
 
     def set_later(self, delay, var_id, value):
         timer = threading.Timer(delay, self.set, (var_id, value))
@@ -75,7 +80,8 @@ class FakeAmmio:
             return {"error": 1}
         vtype, vdir = self._info(var_id)
         if cmd == "read":
-            return {"var_id": var_id, "type": 0, "timestamp": time.time_ns(), "value": self.values[var_id]}
+            stamp = self.stamps.get(var_id, time.time_ns())
+            return {"var_id": var_id, "type": 0, "timestamp": float(stamp), "value": self.values[var_id]}
         if vdir == "output":
             return {"error": 2}
         value = req.get("value")

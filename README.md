@@ -76,6 +76,7 @@ The evidence report (`results/<date_time>/TC_001_brake.test_brake_engages.txt`):
   Executed by:    jdoe
   Host:           bench-01
   Endpoint:       tcp://127.0.0.1:5555
+  Max value age:  1.0s (older SUT outputs are an ERROR)
   Tool:           ammtest 0.2.0, Python 3.13.1, Linux-6.8.0-x86_64-with-glibc2.39
 ================================================================================
 
@@ -86,9 +87,9 @@ The evidence report (`results/<date_time>/TC_001_brake.test_brake_engages.txt`):
 
 --- INITIAL STATE ---
 
-  brake_pressure  float32  output  0.0
+  brake_pressure  float32  output  0.0  age 0.042s
   brake_request   uint8    input   0
-  brake_status    uint8    output  0
+  brake_status    uint8    output  0    age 0.042s
 
 --- LOG ---
 
@@ -158,6 +159,22 @@ sut.check("mode", Condition(lambda v: v in (2, 3), "is 2 or 3"))   # custom -> [
 
 Each condition describes itself in the report, so the evidence reads the same whichever way the test was written.
 
+### Stale values are an ERROR, not a PASS
+
+ammio keeps the last value it received for each output. If the bus or the SUT goes silent, `read` keeps returning that last value, and a test could pass against data that is minutes old.
+
+Every reply from ammio carries the time the value was last received from the SUT, and ammtest checks it on every read of an output:
+
+```
+StaleValueError: 'brake_status' is stale: last received from the SUT 5.006s ago (max age 1.0s)
+```
+
+- **Default limit:** 1 s, which is 10 bus cycles of ammio's default 100 ms `period_ms`.
+- **Changing it:** `--max-age SECONDS` or `AMMTEST_MAX_AGE`; `--max-age 0` disables the check. The value used is recorded in every report.
+- **In the INITIAL STATE table** each output shows its age. A stale output there is flagged but doesn't fail the test unless the test reads it.
+- **Inputs are never checked:** an input that was last written a minute ago is normal.
+- **Clocks:** if ammio runs on another machine, both clocks must be synchronised (NTP). A timestamp more than `max_age` in the future is reported as an ERROR, because it means the clocks have drifted.
+
 ### Safe state
 
 Put a `_safe_state.py` next to your tests:
@@ -180,7 +197,7 @@ def safe_state(sut):
 |--------|------|
 | `PASS` | No check failed |
 | `FAIL` | A check failed, or a plain `assert` failed |
-| `ERROR` | The test could not execute: unknown variable, refused write, bug in the test, safe state failed |
+| `ERROR` | The test could not execute: unknown variable, refused write, stale SUT output, bug in the test, safe state failed |
 
 If the connection to ammio is lost, a safe state fails, or you press Ctrl+C, the run stops. The remaining tests are reported as `NOT RUN`.
 
@@ -193,7 +210,7 @@ If the connection to ammio is lost, a safe state fails, or you press Ctrl+C, the
 ## Command line
 
 ```bash
-ammtest run <path> [-e ENDPOINT] [-r RESULTS] [-v]   # run tests, write evidence
+ammtest run <path> [-e ENDPOINT] [-r RESULTS] [-v] [--max-age SECONDS]   # run tests, write evidence
 ammtest vars [-e ENDPOINT]                            # list the variables ammio exposes
 ammtest trace <path>                                  # tests -> requirements
 ammtest trace <path> --reqs reqs.csv [--col N] [--delimiter ";"] [--skip-header]
@@ -231,6 +248,22 @@ Configuration management of the evidence:
 - **Small and reviewable.** About 1,300 lines including docstrings, a single runtime dependency (`pynng`), and no plugins or hidden configuration.
 - **Deterministic evidence.** Report text comes from explicit condition objects, never from parsing source code. Values are logged as ammio actually stores them.
 - **Verified.** The framework has its own test suite (`uv run pytest`), run against an in-process fake ammio that mirrors ammio's protocol (error codes, directions, C-cast storage). CI runs it on Linux and Windows, with Python 3.12 and 3.13.
+
+## Migrating from 0.1
+
+| 0.1 | 0.2 |
+|-----|-----|
+| `def test(cl: AmmioClient, th: AmmTestHelper)` | `def test(sut)` |
+| `cl.write("x", 1)` / `cl.read("x")` | `sut.write("x", 1)` / `sut.read("x")` |
+| `th.check("x", lambda v: v == 1)` | `sut.check("x", 1)` |
+| `th.check("x", lambda v: 80 <= v <= 120)` | `sut.check("x", between(80, 120))` |
+| `th.check_until / check_stable / check_at / wait` | same names on `sut` |
+| `requirements=[{"req": "REQ-1", "baseline": "A"}]` | `requirements={"REQ-1": "A"}` |
+| `version="0.1.0"` | removed: the file hash and git commit identify the test |
+| `ammtest trace-tests <path>` | `ammtest trace <path>` |
+| `ammtest trace-reqs <path> --reqs=f.csv --col=1` | `ammtest trace <path> --reqs f.csv --col 1` |
+| `--tests-root`, `--output` | removed (redirect output with `>` if needed) |
+| exit code always 0 | 0 pass, 1 failed, 2 could not run |
 
 ## Development
 

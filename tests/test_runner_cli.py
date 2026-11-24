@@ -221,6 +221,36 @@ def test_connection_loss_aborts_run(ammio, tmp_path):
     assert data["final_safe_state"] == "NOT APPLIED: connection lost"
 
 
+def test_stale_output_makes_the_test_an_error(sut_vars, tmp_path, suite, capsys):
+    sut_vars.freeze("brake_status", 5)
+    assert run(suite / "TC_001.py", sut_vars.endpoint, tmp_path / "r1") == 1
+    run_dir, data = outputs(tmp_path / "r1")
+    assert data["tests"][0]["status"] == "ERROR"
+    assert data["max_value_age_s"] == 1.0
+    report = (run_dir / data["tests"][0]["report"]).read_text()
+    assert "Max value age:  1.0s (older SUT outputs are an ERROR)" in report
+    assert "brake_status   uint8    output  1    STALE (age 5." in report
+    assert "'brake_status' is stale" in report
+
+    # explicitly disabled: recorded in the evidence
+    assert main(["run", str(suite / "TC_001.py"), "-e", sut_vars.endpoint, "-r", str(tmp_path / "r2"),
+                 "--max-age", "0"]) == 0
+    run_dir, data = outputs(tmp_path / "r2")
+    assert data["max_value_age_s"] == 0
+    assert "Max value age:  not checked" in (run_dir / data["tests"][0]["report"]).read_text()
+
+
+def test_max_age_from_env_and_validation(monkeypatch, capsys):
+    from ammtest.cli import _parser
+
+    monkeypatch.setenv("AMMTEST_MAX_AGE", "2.5")
+    assert _parser().parse_args(["run", "x"]).max_age == 2.5
+    monkeypatch.setenv("AMMTEST_MAX_AGE", "soon")
+    with pytest.raises(SystemExit) as e:
+        _parser().parse_args(["run", "x"])
+    assert e.value.code == 2
+
+
 def test_no_variables_in_ammio(ammio, tmp_path):
     write(tmp_path, "t.py", "@ammtest()\ndef test(sut): pass\n")
     with pytest.raises(Exception, match="exposes no variables"):

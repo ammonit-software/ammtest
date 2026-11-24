@@ -8,6 +8,7 @@ import sys
 from . import __version__
 from .client import AmmioClient, AmmioError
 from .runner import EXIT_ERROR, EXIT_FAIL, EXIT_PASS, Case, CollectionError, discover, run
+from .sut import DEFAULT_MAX_AGE
 
 DEFAULT_ENDPOINT = "tcp://127.0.0.1:5555"
 
@@ -19,7 +20,7 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
 
 
 def _cmd_run(args) -> int:
-    return run(args.path, args.endpoint, args.results, args.verbose)
+    return run(args.path, args.endpoint, args.results, args.verbose, args.max_age)
 
 
 def _cmd_vars(args) -> int:
@@ -114,6 +115,12 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("-e", "--endpoint", default=default_endpoint, help=endpoint_help)
     r.add_argument("-r", "--results", default="results", help="results folder (default: results)")
     r.add_argument("-v", "--verbose", action="store_true", help="stream the full report to the terminal")
+    r.add_argument(
+        "--max-age", type=float, metavar="SECONDS",
+        default=os.environ.get("AMMTEST_MAX_AGE", str(DEFAULT_MAX_AGE)),  # str: argparse validates it
+        help="a SUT output not received within this time is stale and makes the test an ERROR; "
+        f"0 disables the check (default: $AMMTEST_MAX_AGE, else {DEFAULT_MAX_AGE})",
+    )
     r.set_defaults(func=_cmd_run)
 
     v = sub.add_parser("vars", allow_abbrev=False, help="list the variables ammio exposes")

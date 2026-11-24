@@ -1,8 +1,9 @@
+import threading
 import time
 
 import pytest
 
-from ammtest import AmmioClient, AmmioConnectionError, AmmioError, between
+from ammtest import AmmioClient, AmmioConnectionError, AmmioError, StaleValueError, between
 
 
 # --- client -------------------------------------------------------------------
@@ -129,7 +130,65 @@ def test_failure_location_through_user_helper(ammio, sut):
 def test_snapshot(ammio, sut):
     ammio.define("b", 2, type="uint8", dir="output")
     ammio.define("a", 1.5)
-    assert sut._snapshot() == [("a", "float64", "input", 1.5), ("b", "uint8", "output", 2)]
+    ammio.define("c", 0, dir="output")
+    ammio.freeze("c", 30)
+    (a, b, c) = sut._snapshot()
+    assert a == ("a", "float64", "input", "1.5", "")  # inputs: no freshness
+    assert b[:4] == ("b", "uint8", "output", "2") and b[4].startswith("age 0.0")
+    assert c[4].startswith("STALE (age 30.")  # reported, never raised
+
+
+# --- sut: stale values ------------------------------------------------------------
+
+
+def test_client_read_sample_has_timestamp(ammio, client):
+    ammio.define("x", 1, dir="output")
+    value, stamp = client.read_sample("x")
+    assert value == 1 and abs(time.time_ns() - stamp) < 1e9
+
+
+def test_stale_output_is_an_error(ammio, sut):
+    ammio.define("brake_status", 1, type="uint8", dir="output")
+    assert sut.check("brake_status", 1)
+    ammio.freeze("brake_status", 5)  # SUT stops publishing
+    with pytest.raises(StaleValueError, match="'brake_status' is stale: last received from the SUT 5.0"):
+        sut.check("brake_status", 1)
+    with pytest.raises(StaleValueError):
+        sut.read("brake_status")
+
+
+def test_stale_during_timed_check(ammio, sut):
+    ammio.define("x", 0, dir="output")
+    threading.Timer(0.1, ammio.freeze, ("x", 10)).start()
+    with pytest.raises(StaleValueError):
+        sut.check_until("x", 1, timeout=1.0)
+
+
+def test_inputs_are_not_checked_for_freshness(ammio, sut):
+    ammio.define("cmd", 1, dir="input")
+    ammio.freeze("cmd", 60)  # last written a minute ago: normal for an input
+    assert sut.check("cmd", 1)
+
+
+def test_never_received_and_future_timestamps(ammio, sut):
+    ammio.define("x", 0, dir="output")
+    ammio.stamps["x"] = 0  # ammio starts every value at timestamp 0
+    with pytest.raises(StaleValueError, match="never been received"):
+        sut.read("x")
+    ammio.freeze("x", -10)
+    with pytest.raises(StaleValueError, match="clocks? .*not synchronized"):
+        sut.read("x")
+
+
+def test_max_age_zero_disables_the_check(ammio, client):
+    from ammtest import Sut
+
+    ammio.define("x", 1, dir="output")
+    ammio.freeze("x", 3600)
+    assert Sut(client, lambda *a: None, max_age=0).check("x", 1)
+    assert Sut(client, lambda *a: None, max_age=7200).check("x", 1)
+    with pytest.raises(ValueError):
+        Sut(client, max_age=-1)
 
 
 def test_negative_durations_rejected(ammio, sut):

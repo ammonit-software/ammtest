@@ -16,6 +16,10 @@ class AmmioConnectionError(AmmioError):
     """ammio is unreachable, stopped answering, or answered garbage."""
 
 
+class StaleValueError(AmmioError):
+    """A SUT output has not been refreshed by ammio recently: its value cannot be trusted."""
+
+
 class AmmioClient:
     """Minimal ammio client.
 
@@ -73,10 +77,16 @@ class AmmioClient:
 
     def read(self, var_id: str) -> Value:
         """Return the current value of `var_id`."""
+        return self.read_sample(var_id)[0]
+
+    def read_sample(self, var_id: str) -> tuple[Value, int | None]:
+        """Return (value, timestamp): the timestamp is when ammio last updated the value,
+        in nanoseconds since the Unix epoch on ammio's clock (None if not reported)."""
         reply = self._request({"cmd": "read", "var_id": var_id})
         if "value" not in reply:
             raise AmmioConnectionError(f"ammio reply to read {var_id!r} has no value")
-        return reply["value"]
+        stamp = reply.get("timestamp")
+        return reply["value"], (int(stamp) if isinstance(stamp, (int, float)) else None)
 
     def write(self, var_id: str, value: Value) -> None:
         """Force `var_id` to `value`. ammio only takes numbers, so booleans are sent as 1/0."""

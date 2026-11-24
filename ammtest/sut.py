@@ -11,10 +11,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .client import AmmioClient, AmmioError, Value
+from .client import AmmioClient, AmmioError, StaleValueError, Value
 from .conditions import as_condition
 
 POLL_INTERVAL = 0.01  # seconds between samples in timed checks
+DEFAULT_MAX_AGE = 1.0  # seconds; older SUT outputs are stale (ammio interfaces refresh every 100 ms by default)
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ammio stores a written value with a plain C cast: out-of-range integers wrap
@@ -63,6 +64,27 @@ class Failure:
     source: str
 
 
+def value_age(stamp: int | None) -> float | None:
+    """Seconds since ammio last updated a value (ammio's clock vs this computer's clock)."""
+    return None if not stamp else time.time() - stamp / 1e9
+
+
+def check_fresh(var_id: str, stamp: int | None, max_age: float) -> None:
+    """Raise StaleValueError unless ammio updated `var_id` within the last `max_age` seconds."""
+    if stamp is None:
+        raise StaleValueError(f"ammio reported no timestamp for {var_id!r}; freshness cannot be verified")
+    if stamp == 0:
+        raise StaleValueError(f"{var_id!r} has never been received from the SUT")
+    age = value_age(stamp)
+    if age > max_age:
+        raise StaleValueError(f"{var_id!r} is stale: last received from the SUT {age:.3f}s ago (max age {max_age}s)")
+    if age < -max_age:
+        raise StaleValueError(
+            f"{var_id!r} has a timestamp {-age:.3f}s in the future: "
+            "ammio's clock and this computer's clock are not synchronized"
+        )
+
+
 def _print_log(text: str, style: str = "") -> None:
     print(text)
 
@@ -83,11 +105,16 @@ class Sut:
       or any callable.
     - Timed checks sample every `interval` seconds; measured times have that
       resolution plus one ammio round trip.
+    - Every read of a SUT output is checked for freshness: if ammio has not
+      received it from the SUT within `max_age` seconds, the read raises
+      StaleValueError (the test is an ERROR). `max_age=0` disables the check.
     """
 
-    def __init__(self, client: AmmioClient, log: Log = _print_log):
+    def __init__(self, client: AmmioClient, log: Log = _print_log, max_age: float = DEFAULT_MAX_AGE):
+        _nonneg("max_age", max_age)
         self._client = client
         self._log = log
+        self.max_age = max_age
         self._vars: dict[str, dict] = {}  # ammio's variable table, fetched on first use
         self.failures: list[Failure] = []
         self.passed = 0
@@ -110,8 +137,7 @@ class Sut:
 
     def read(self, var_id: str) -> Value:
         """Read `var_id` and log it (no verdict)."""
-        self._var(var_id)
-        value = self._client.read(var_id)
+        value = self._read(var_id)
         self._log(f"READ   {var_id} = {value!r}")
         return value
 
@@ -131,7 +157,7 @@ class Sut:
         """`var_id` satisfies `expected` right now."""
         self._var(var_id)
         cond = as_condition(expected)
-        value = self._client.read(var_id)
+        value = self._read(var_id)
         return self._verdict("check", cond(value), f"{var_id} = {value!r}  [{cond}]")
 
     def check_until(self, var_id: str, expected: Any, timeout: float, interval: float = POLL_INTERVAL) -> bool:
@@ -141,7 +167,7 @@ class Sut:
         cond = as_condition(expected)
         start = time.monotonic()
         while True:
-            value = self._client.read(var_id)
+            value = self._read(var_id)
             elapsed = time.monotonic() - start
             ok = cond(value)
             if ok and elapsed <= timeout:
@@ -164,7 +190,7 @@ class Sut:
         start = time.monotonic()
         while True:
             elapsed = time.monotonic() - start  # taken before the read: last sample is at/after `duration`
-            value = self._client.read(var_id)
+            value = self._read(var_id)
             if not cond(value):
                 return self._verdict(
                     "check_stable", False,
@@ -191,7 +217,7 @@ class Sut:
         window = f"expected {at}s +- {tolerance}s"
         start = time.monotonic()
         while True:
-            value = self._client.read(var_id)
+            value = self._read(var_id)
             elapsed = time.monotonic() - start
             if cond(value):
                 if elapsed < at - tolerance:
@@ -225,13 +251,36 @@ class Sut:
             raise AmmioError(f"unknown variable {var_id!r}{hint}")
         return info
 
-    def _snapshot(self) -> list[tuple[str, str, str, Value]]:
-        """(var_id, type, dir, value) for every variable, sorted by name. Reads are sequential."""
+    def _read(self, var_id: str) -> Value:
+        info = self._var(var_id)
+        value, stamp = self._client.read_sample(var_id)
+        if self.max_age and info.get("dir") == "output":
+            check_fresh(var_id, stamp, self.max_age)
+        return value
+
+    def _snapshot(self) -> list[tuple[str, str, str, str, str]]:
+        """(var_id, type, dir, value, freshness) for every variable, sorted by name.
+
+        Never raises for stale values: unused stale outputs must not fail a test.
+        Reads are sequential, not one atomic snapshot.
+        """
         self._vars = {v["var_id"]: v for v in self._client.list_vars()}
-        return [
-            (var_id, str(info.get("type", "")), str(info.get("dir", "")), self._client.read(var_id))
-            for var_id, info in sorted(self._vars.items())
-        ]
+        rows = []
+        for var_id, info in sorted(self._vars.items()):
+            value, stamp = self._client.read_sample(var_id)
+            freshness = ""
+            if info.get("dir") == "output":
+                age = value_age(stamp)
+                if stamp is None:
+                    freshness = "no timestamp"
+                elif age is None:
+                    freshness = "NEVER RECEIVED"
+                elif self.max_age and abs(age) > self.max_age:
+                    freshness = f"STALE (age {age:.3f}s)"
+                else:
+                    freshness = f"age {age:.3f}s"
+            rows.append((var_id, str(info.get("type", "")), str(info.get("dir", "")), repr(value), freshness))
+        return rows
 
     def _verdict(self, kind: str, ok: bool, detail: str) -> bool:
         if ok:
