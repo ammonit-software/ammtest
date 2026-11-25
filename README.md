@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/ammtest.png" alt="ammtest" width="350"/>
+  <img src="https://raw.githubusercontent.com/ammonit-software/ammtest/main/assets/ammtest.png" alt="ammtest" width="350"/>
 </p>
 
 <p align="center">
